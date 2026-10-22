@@ -5,21 +5,32 @@
 
 ## File & Component Audit
 
-| Item | Present | Working / Notes |
+| Item | Present | Working |
 |---|---|---|
-| `commands/basic_parser.py` | ✅ | Rule-based parser, no PySide6 imports |
-| `commands/flow.py` | ✅ | Staged flow with FlowEvent iterator |
-| `ui/command_center.py` | ✅ | Full Command Center page with chips, input, result cards |
-| `tests/check_signals.py` | ✅ | Verifies `Signal(object, …)` migration and AST signal safety |
-| `assets/fonts/*.ttf` | ✅ | `Inter.ttf` (876 KB) & `InterTight.ttf` (581 KB) installed |
-| `.gitignore` | ✅ | Covers .venv, .venv_test, __pycache__, logs, demo data, secrets |
-| `.agents/` | ✅ | Workflow and rule definitions |
-| `graphify-out/` | ✅ | graph.json, graph.html, GRAPH_REPORT.md present |
-| Git remote | ✅ | `https://github.com/Mohitfegade/OmniStore.git` |
-| Git commits | ✅ | Clean history, all changes tracked |
-| Demo data folder | ✅ | `C:\Users\Mohit\OmniStore_Demo` exists |
-| Screenshots | ✅ | `docs/screenshots/` (6 real UI screenshots) |
-| Documentation | ✅ | `docs/submission.md`, `README.md`, `docs/demo_script.md` |
+| `commands/basic_parser.py` | yes | yes — rule-based parser, 18 query patterns, no PySide6 |
+| `commands/flow.py` | yes | yes — staged flow with FlowEvent iterator, sub-2s tool execution |
+| `ui/command_center.py` | yes | yes — conversational page, 6 chips, input, result card, Gemma stream |
+| `tests/check_signals.py` | yes | yes — AST check + 5 GB 64-bit integer emission tests pass |
+| `assets/fonts/*.ttf` | yes | yes — `Inter.ttf` (876 KB) & `InterTight.ttf` (581 KB) loaded at startup |
+| `.gitignore` | yes | yes — covers .venv, .venv_test, __pycache__, logs, demo data, secrets |
+| `LICENSE` | yes | yes — MIT License (2026, Mohit) |
+| `.agents/` | yes | yes — workflows and rule definitions |
+| `graphify-out/` | yes | yes — graph.json (907 nodes, 2380 edges, 50 communities), graph.html |
+| `git remote -v` | yes | yes — `origin https://github.com/Mohitfegade/OmniStore.git (fetch/push)` |
+| `git log --oneline -n 5` | yes | yes — clean commit history on branch main |
+
+### Git State Details
+- `git remote -v`:
+  ```
+  origin  https://github.com/Mohitfegade/OmniStore.git (fetch)
+  origin  https://github.com/Mohitfegade/OmniStore.git (push)
+  ```
+- `git log --oneline -n 5`:
+  ```
+  4883916 Complete submission readiness: add fonts, screenshots, docs, pinned deps, and pass all 15 tests
+  9fa724a Fix 32-bit signal overflow on large scans, guard QFont sizes, add Command Center flow and tests
+  7c6f2fc Initial commit: OmniStore engine, UI and Gemma service layer
+  ```
 
 ## Signal Overflow Fix (32-bit → object)
 
@@ -45,12 +56,13 @@
 |---|---|---|---|
 | 1 | No Inter / Inter Tight TTF fonts | Medium | ✅ Installed `Inter.ttf` and `InterTight.ttf` into `assets/fonts/` |
 | 2 | `requirements.txt` not pinned | Low | ✅ Pinned to `PySide6==6.12.0`, `psutil==7.2.2`, `Send2Trash==2.1.0` |
-| 3 | No `docs/submission.md` | Low | ✅ Created comprehensive `docs/submission.md` with complete architecture report |
-| 4 | README.md lacks author, setup, screenshots | Low | ✅ Updated `README.md` with author, highlights, screenshots, and test guide |
-| 5 | `.venv_test` not in `.gitignore` | Low | ✅ Added `.venv_test/` to `.gitignore` |
-| 6 | `check_ui_chips.py` outdated worker reference | Medium | ✅ Updated to `_active_worker` and `FlowEvent` signals — all 6 chips pass |
+| 3 | No `LICENSE` | Low | ✅ Created MIT License (2026, Mohit) |
+| 4 | No `docs/submission.md` | Low | ✅ Created comprehensive `docs/submission.md` with complete architecture report |
+| 5 | README.md lacks author, setup, screenshots | Low | ✅ Updated `README.md` with author, highlights, screenshots, and test guide |
+| 6 | `.venv_test` not in `.gitignore` | Low | ✅ Added `.venv_test/` to `.gitignore` |
+| 7 | `check_ui_chips.py` outdated worker reference | Medium | ✅ Updated to `_active_worker` and `FlowEvent` signals — all 6 chips pass |
 
-## Full Test Suite Verification
+## Full Test Suite Verification (15/15 PASS)
 
 | Test Suite | Purpose | Result |
 |---|---|---|
