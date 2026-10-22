@@ -1,18 +1,21 @@
 """
 workers/gemma_worker.py
 =======================
-Background QThread workers for Gemma health checks and agent requests.
+Background QThread workers for Gemma health checks, warmup, and staged command execution.
 Keeps the UI completely non-blocking during LLM interactions.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import threading
+from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from commands.agent import AgentResponse, handle_user_request
+from commands.events import FlowEvent
+from commands.flow import CommandContext, run_command
 from engine.duplicates import DuplicateResult
 from engine.models import ScanResult
 from gemma.config import GemmaSettings, load_settings
@@ -20,6 +23,57 @@ from gemma.ollama_provider import OllamaProvider
 from gemma.provider import ProviderStatus
 
 log = logging.getLogger(__name__)
+
+
+class CommandWorker(QThread):
+    """
+    Executes a user request through the staged flow in the background.
+    Emits FlowEvent instances via eventReady signal as they occur.
+    """
+    eventReady = Signal(object)
+
+    def __init__(
+        self,
+        text: str,
+        ctx: CommandContext,
+        provider: Any,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._text = text
+        self._ctx = ctx
+        self._provider = provider
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            for event in run_command(self._text, self._ctx, self._provider, self._cancel):
+                self.eventReady.emit(event)
+                if self._cancel.is_set():
+                    break
+        except Exception as exc:
+            log.error("CommandWorker error: %s", exc, exc_info=True)
+            self.eventReady.emit(FlowEvent(kind="error", text=f"Command error: {exc}"))
+
+
+class WarmupWorker(QThread):
+    """Warms up local Gemma model weights into VRAM once in the background."""
+    done = Signal(bool)
+
+    def __init__(self, provider: Any = None, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._provider = provider or OllamaProvider()
+
+    def run(self) -> None:
+        try:
+            ok = self._provider.warm_up()
+            self.done.emit(ok)
+        except Exception as exc:
+            log.warning("WarmupWorker error: %s", exc)
+            self.done.emit(False)
 
 
 class GemmaHealthWorker(QThread):
@@ -42,8 +96,8 @@ class GemmaHealthWorker(QThread):
 
 
 class GemmaRequestWorker(QThread):
-    """Executes a user request through the Gemma agent in the background."""
-    response_ready = Signal(object)  # AgentResponse
+    """Legacy request worker for backwards compatibility."""
+    response_ready = Signal(object)
     failed = Signal(str)
 
     def __init__(
@@ -75,7 +129,7 @@ class GemmaRequestWorker(QThread):
 
 
 class GemmaWarmupWorker(QThread):
-    """Warms up local Gemma model weights into VRAM in the background."""
+    """Legacy warmup worker alias."""
     finished = Signal(bool)
     failed = Signal(str)
 
@@ -91,4 +145,3 @@ class GemmaWarmupWorker(QThread):
         except Exception as exc:
             log.warning("GemmaWarmupWorker error: %s", exc)
             self.failed.emit(str(exc))
-

@@ -43,7 +43,7 @@ class DriveWorker(QThread):
         last-resort safety net.
     """
 
-    drives_ready:   Signal = Signal(list)
+    drives_ready:   Signal = Signal(object)
     error_occurred: Signal = Signal(str)
 
     def run(self) -> None:

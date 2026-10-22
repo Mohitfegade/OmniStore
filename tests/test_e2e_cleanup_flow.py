@@ -204,7 +204,8 @@ def run_e2e():
     finally:
         print(f"\nCleaning up temp copy at {tmp_root} ...", flush=True)
         try:
-            shutil.rmtree(str(tmp_root), ignore_errors=True)
+            from send2trash import send2trash
+            send2trash(str(tmp_root))
         except Exception:
             pass
 

@@ -1,199 +1,304 @@
-# Contract: OmniStore Command Center
+# Contract: OmniStore Command Center (PROMPT 8)
 
-This contract defines the interfaces, signatures, dataclasses, signals, and invariants for the Command Center screen and staged execution flow in OmniStore. All modules must follow this contract exactly without renaming.
+> **Contract Adjustments Noted at the Top:**
+> 1. `commands/basic_parser.py`: The function `parse_basic(text: str) -> ParsedCommand | None` now returns a single `@dataclass(frozen=True) ParsedCommand` or `None` (rather than `list[ToolCall]`).
+> 2. `commands/tools.py`: `suggest_free_space` validator limit for `target_gb` is increased to `0.1` .. `5000.0` (from 1000.0). The returned payload provides the exact required shape (`target_human`, `reachable`, `total_up_to_bytes`, `total_up_to_human`, `suggestions`, `note`), while also retaining `candidates` for backwards compatibility.
+> 3. `commands/flow.py`: `CommandContext` defines `scan: Optional[ScanResult] = None`, `duplicates: Optional[DuplicateResult] = None`, and `drives: Optional[List[DriveInfo]] = None` using models from `engine.models` and `engine.drives`.
+> 4. `workers/gemma_worker.py`: Adds `CommandWorker(text, ctx, provider)` emitting `eventReady(object)` (each `FlowEvent`) and `WarmupWorker` emitting `done(bool)`, while preserving existing health check workers.
+> 5. `gemma/ollama_provider.py`: `chat_stream` signature is `(self, messages: list[dict], *, max_tokens: int = 200, cancel: threading.Event | None = None) -> Iterator[str]` with `keep_alive="30m"`, `think: False`, and low temperature.
 
 ---
 
-## 1. Staged Agent Flow (`commands/agent.py`)
+## 1. Engine Formatting (`engine/formatting.py`)
 
 No PySide6/Qt imports.
 
 ```python
-from typing import Callable, Optional, Dict, Any, List
-from engine.models import ScanResult
-from engine.duplicates import DuplicateResult
-from gemma.provider import GemmaProvider
-from gemma.config import GemmaSettings
-from commands.tools import ToolResult
-
-StageCallback = Callable[[str, Dict[str, Any]], None]
-
-def handle_user_request_staged(
-    text: str,
-    scan_result: Optional[ScanResult],
-    duplicate_result: Optional[DuplicateResult] = None,
-    provider: Optional[GemmaProvider] = None,
-    settings: Optional[GemmaSettings] = None,
-    on_stage: Optional[StageCallback] = None,
-    cancel_token: Optional[Callable[[], bool]] = None,
-) -> AgentResponse:
-    """
-    Executes user request in stages:
-    1. on_stage("interpreting", {})
-    2. Intent resolution via Gemma OR fast_mode rule-based basic_parser
-    3. Deterministic tool execution on scan_result
-    4. on_stage("tools_ready", {"tool_runs": list[ToolResult], "mode": "gemma" | "basic"})
-    5. Explanation generation via provider.chat_stream:
-       - on_stage("explanation_chunk", {"text": chunk}) for each token/chunk
-    6. on_stage("done", {"response": AgentResponse})
-    Returns AgentResponse.
-    """
+def format_size(n: int) -> str:
+    """Format byte count into human-readable binary string: e.g. '1.4 GB', '23 MB', '0 B'."""
     ...
 
-def handle_user_request(
-    text: str,
-    scan_result: Optional[ScanResult],
-    duplicate_result: Optional[DuplicateResult] = None,
-    provider: Optional[GemmaProvider] = None,
-    settings: Optional[GemmaSettings] = None,
-) -> AgentResponse:
-    """Wraps handle_user_request_staged for backwards compatibility."""
+def display_name(path: str) -> str:
+    """Return file/folder name; for drive roots return the drive letter (e.g. 'C:')."""
     ...
 ```
-
-### Explanation Prompt & Quality Rules:
-- At most 3 short sentences or a short bullet list of at most 5 items.
-- Always use human-readable sizes (the `size_human` fields) and file/folder names.
-- Never mention group IDs or raw unformatted byte counts.
-- Mention "up to" for reclaimable space.
-- State only facts from the tool results. Never claim a file is safe to delete.
-- If results are empty, say "No matching files found."
 
 ---
 
 ## 2. Tools Registry (`commands/tools.py`)
 
 No PySide6/Qt imports.
-
-### Updates to Existing Tools:
-1. Every `ToolResult.summary` and `data` row gains `"size_human"` (e.g. `"150 MB"`, binary 1024-based units) next to `size_bytes`.
-2. Folder entries in `get_largest_folders` and `get_scan_overview` include both `"name"` (last path component) and `"path"`.
-
-### New Tool: `suggest_free_space`
-- Schema parameter: `target_gb` (number, minimum 0.1, maximum 1000).
-- Candidate sources:
-  1. Exact duplicate copies, keeping the OLDEST copy of each group intact.
-  2. Large files not accessed for 180+ days (labeled "review only").
-- Returns:
-  - `candidates`: list of items sorted descending by size, capped at 200 rows.
-    Each item contains: `path`, `name`, `size_bytes`, `size_human`, `reason` ("Exact duplicate" or "Large file not opened recently"), `keep_path` (for duplicates, None otherwise), `potential` (str, e.g. "potential reclaimable"). Never label anything "safe".
-  - `target_bytes`: target in bytes.
-  - `cumulative_bytes`: total reclaimable/reviewable bytes across candidates.
-  - `cumulative_human`: formatted string.
-  - `target_reached`: bool, whether candidates meet or exceed `target_gb`.
+- Keep all existing 6 tools: `get_scan_overview`, `find_largest_files`, `filter_files`, `get_largest_folders`, `get_category_breakdown`, `get_duplicate_summary`.
+- Every size field gets a sibling `"<field>_human"` via `format_size`.
+- Every folder/file entry gets `"name"` and `"parent_name"` (via `display_name`), never only a raw path or group id.
+- 7th read-only tool: `suggest_free_space(target_gb: float) -> dict`
+  - Deterministic. Builds suggestions from:
+    (a) exact duplicate extra copies if duplicate results exist,
+    (b) largest files older than 365 days,
+    (c) empty files (size == 0).
+  - Stops when running total reaches target.
+  - Returns:
+    ```python
+    {
+        "target_human": str,
+        "reachable": bool,
+        "total_up_to_bytes": int,
+        "total_up_to_human": str,
+        "suggestions": [
+            {
+                "label": str,
+                "reason": str,
+                "count": int,
+                "size_bytes": int,
+                "size_human": str,
+                "paths": list[str]
+            }
+        ],
+        "note": str  # Always contains "up to" and states the user must review everything
+    }
+    ```
+  - Schema validator: `target_gb` from `0.1` to `5000.0`.
+  - Asserted tool count: 7.
 
 ---
 
-## 3. Deterministic Basic Parser (`commands/basic_parser.py`)
+## 3. Basic Parser (`commands/basic_parser.py`)
 
-No PySide6/Qt imports.
+No PySide6/Qt imports, no Gemma dependency.
 
 ```python
-from typing import Optional, List
-from gemma.provider import ToolCall
+from dataclasses import dataclass
 
-def parse_basic(text: str) -> Optional[List[ToolCall]]:
-    """
-    Rule-based deterministic parser mapping common natural language queries to
-    the exact same ToolCall objects Gemma would produce.
-    Returns None if the intent is unrecognized (never guess).
-    """
+@dataclass(frozen=True)
+class ParsedCommand:
+    tool: str
+    args: dict
+    confidence: float
+    rule: str
+
+def parse_basic(text: str) -> ParsedCommand | None:
     ...
 ```
 
-Supported query patterns:
-- "largest files" / "biggest files" (+ optional top N) -> `find_largest_files(limit=N)`
-- "what is taking up the most space/storage" -> `get_largest_folders(limit=5)`
-- "<category> larger than N MB/GB" -> `filter_files(category=..., min_size_mb=...)`
-- "files larger than N MB/GB" -> `filter_files(min_size_mb=...)`
-- "find duplicates" / "duplicate files" -> `get_duplicate_summary(max_groups=5)`
-- "files not opened in N days/months/years" or "haven't opened recently" (default 180 days) -> `filter_files(not_accessed_for_days=...)`
-- "PDFs modified last month / last week / in the last N days" -> `filter_files(category="Documents", extensions=["pdf"], modified_after_days=...)`
-- "ways to free N GB" / "free up N GB" -> `suggest_free_space(target_gb=N)`
-- "biggest folders" -> `get_largest_folders(limit=5)`
-- "overview" / "summary" -> `get_scan_overview()`
+Rules (case-insensitive, regex/keyword):
+- Largest/biggest files (+ "top N", default 10) -> `find_largest_files`
+- File types/category breakdown (+ "videos", "images", "documents", etc.) -> `filter_files` or `get_category_breakdown`
+- Biggest folders -> `get_largest_folders`
+- Duplicates -> `get_duplicate_summary`
+- Old files ("older than N days/months/years" converted to days) -> `filter_files` with `modified_before_days`
+- "I need N GB/MB free" / "free up N GB" -> `suggest_free_space` with `target_gb`
+- Drive usage / free space -> `get_scan_overview` or drive usage
+- Destructive commands asking to delete / remove / move / clean / wipe must NOT map to a tool: return `None`.
+- Gibberish / unrecognized queries -> return `None`.
 
 ---
 
-## 4. Provider Streaming & Speed (`gemma/ollama_provider.py`, `gemma/config.py`)
+## 4. Gemma Provider (`gemma/ollama_provider.py`)
 
 No PySide6/Qt imports.
 
-### Config (`gemma/config.py`)
 ```python
-@dataclass
-class GemmaSettings:
-    provider: str = "ollama"
-    host: str = "http://localhost:11434"
-    model: str = "gemma4:e2b"
-    num_ctx: int = 8192
-    temperature: float = 0.2
-    timeout_s: int = 60
-    enabled: bool = True
-    fast_mode: bool = False   # When True, try parse_basic first before Gemma
+import threading
+from typing import Iterator
+
+def warm_up(self) -> bool:
+    """Send a lightweight 1-token request with keep_alive='30m'."""
+    ...
+
+def chat_stream(
+    self,
+    messages: list[dict],
+    *,
+    max_tokens: int = 200,
+    cancel: threading.Event | None = None
+) -> Iterator[str]:
+    """Stream token chunks via Ollama NDJSON API; keep_alive='30m', think=False, low temperature."""
+    ...
 ```
+- Reuses localhost-only guard and audit logging for every call.
 
-### Provider (`gemma/ollama_provider.py`)
+---
+
+## 5. Gemma Prompts (`gemma/prompts.py`)
+
+No PySide6/Qt imports.
+
 ```python
-class OllamaProvider(GemmaProvider):
-    def chat_stream(
-        self,
-        messages: List[Dict[str, Any]],
-        options: Optional[Dict[str, Any]] = None,
-        cancel_token: Optional[Callable[[], bool]] = None,
-    ) -> Iterator[str]:
-        """
-        Streaming chat yielding text chunks as they arrive from Ollama NDJSON stream.
-        Passes keep_alive="30m", think=False, num_predict=220 for explanation calls.
-        """
-        ...
+ROUTER_SYSTEM: str
+# Minimal: tool names + one line each + "reply with exactly one tool call". Identical prefix every call.
 
-    def warm_up(self) -> bool:
-        """Send a lightweight 1-token request with keep_alive="30m" to load model into VRAM."""
-        ...
+EXPLAIN_SYSTEM: str
+# Rules: 2 to 4 short sentences; use only *_human sizes, never raw byte counts;
+# refer to folders/files by name; never mention group ids;
+# say "up to" for reclaimable space; never say junk / safe to delete;
+# do not invent numbers; end with one suggested next step.
+
+def build_explain_messages(question: str, tool_name: str, sanitized_result: dict) -> list[dict]:
+    ...
 ```
 
 ---
 
-## 5. Background Worker (`workers/command_worker.py`)
+## 6. Flow Events (`commands/events.py`)
+
+No PySide6/Qt imports.
+
+```python
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+
+@dataclass(frozen=True)
+class FlowEvent:
+    kind: str             # "routed" | "tool_result" | "explain_chunk" | "explain_done" | "notice" | "error"
+    text: str = ""
+    data: Optional[Dict[str, Any]] = None
+    elapsed_ms: int = 0
+    source: str = ""      # "gemma" | "basic"
+```
+
+Kinds:
+- `"routed"`: `data` contains `{"tool": str, "args": dict, "routed_by": "gemma" | "basic"}`
+- `"tool_result"`: `data` contains executor output dictionary
+- `"explain_chunk"`: `text` contains streaming chunk
+- `"explain_done"`: `source` is `"gemma"` | `"basic"`
+- `"notice"`: informative message (e.g. asking to scan a folder first, or explaining no destructive commands)
+- `"error"`: error message
+
+---
+
+## 7. Command Flow (`commands/flow.py`)
+
+No PySide6/Qt imports.
+
+```python
+import threading
+from dataclasses import dataclass
+from typing import Iterator, Optional, List
+from engine.models import ScanResult
+from engine.duplicates import DuplicateResult
+from engine.drives import DriveInfo
+from commands.events import FlowEvent
+
+@dataclass
+class CommandContext:
+    scan: Optional[ScanResult] = None
+    duplicates: Optional[DuplicateResult] = None
+    drives: Optional[List[DriveInfo]] = None
+
+def run_command(
+    text: str,
+    ctx: CommandContext,
+    provider: Any,
+    cancel: threading.Event | None = None
+) -> Iterator[FlowEvent]:
+    ...
+```
+
+Order is guaranteed: `routed -> tool_result -> explain_chunk* -> explain_done`.
+- Routing: If provider connected, ask Gemma with 6 s timeout. On timeout/error/invalid tool/offline, fall back to `parse_basic` (`routed_by: "basic"`). If both fail, emit `"notice"` listing example questions.
+- Missing scan guard: Tools needing scan data when `ctx.scan is None` emit `"notice"` asking to scan a folder first.
+- Explanation: Stream from Gemma via `chat_stream`. Hard stop after 20 s with a `"notice"` ("Explanation timed out, results above are complete"). If Gemma offline or fails, emit deterministic explanation from `commands/explain_basic.py` (`source: "basic"`).
+- Every event carries `elapsed_ms` since `run_command` invocation.
+
+---
+
+## 8. Basic Explanation (`commands/explain_basic.py`)
+
+No PySide6/Qt imports.
+
+```python
+from typing import Iterator
+
+def explain_basic(tool_name: str, result: dict) -> Iterator[str]:
+    """Deterministic 2 to 4 sentence explanation using real result data and strict wording rules ('up to', no 'junk', no 'safe to delete')."""
+    ...
+```
+
+---
+
+## 9. Command Widgets (`ui/command_widgets.py`)
+
+PySide6 UI widgets.
+
+```python
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QWidget
+
+class ChipRow(QWidget):
+    chipClicked = Signal(str)
+    def set_chips(self, chips: list[str]) -> None: ...
+    def set_enabled_state(self, enabled: bool) -> None: ...
+
+class UserBubble(QWidget):
+    def __init__(self, text: str, parent: QWidget | None = None) -> None: ...
+
+class ResultCard(QWidget):
+    reviewInCleanup = Signal(list)
+    def set_result(self, tool_name: str, data: dict) -> None: ...
+    # Shows real rows with *_human sizes; button "Review in Cleanup" appears only when data has candidate paths.
+
+class ExplanationCard(QWidget):
+    def set_pending(self) -> None: ...
+    def append(self, text: str) -> None: ...
+    def finish(self, source: str) -> None: ...
+    # Displays badge "Explained by Gemma 4 (local)" or "Basic mode".
+
+class NoticeCard(QWidget):
+    def __init__(self, text: str, parent: QWidget | None = None) -> None: ...
+```
+
+Styling:
+- White cards, 20px radius, 1px `#E6E6E8` border, pill buttons, Inter / Inter Tight.
+- All plain `QLabel` instances have a transparent background (enforced in `ui/theme.py`).
+
+---
+
+## 10. Workers (`workers/gemma_worker.py`)
+
+PySide6 QThread workers.
 
 ```python
 from PySide6.QtCore import QThread, Signal
 
 class CommandWorker(QThread):
-    interpreting = Signal()
-    tools_ready = Signal(object)       # dict: {"tool_runs": list[ToolResult], "mode": str}
-    explanation_chunk = Signal(str)    # text chunk
-    finished = Signal(object)          # AgentResponse
-    failed = Signal(str)
+    eventReady = Signal(object)  # Emits FlowEvent instances
 
+    def __init__(self, text: str, ctx: CommandContext, provider: Any, parent=None): ...
     def cancel(self) -> None: ...
-```
 
-### Warmup Worker (`workers/gemma_worker.py`)
-```python
-class GemmaWarmupWorker(QThread):
-    finished = Signal(bool)
-    failed = Signal(str)
+class WarmupWorker(QThread):
+    done = Signal(bool)
+
+    def __init__(self, provider: Any, parent=None): ...
 ```
 
 ---
 
-## 6. Command Center UI (`ui/command_center.py`)
+## 11. Command Center UI (`ui/command_center.py`)
 
-- `CommandCenterPage(QWidget)`:
-  - Top card: input box with sparkle icon, placeholder `"What would you like to explore next?"`, `"Ask"` / `"Stop"` pill button, and 6 suggestion chips.
-  - Feed: newest responses on top.
-  - Response cards:
-    - User query
-    - Status pill / progress ("Understanding request...", "Looked up: largest folders")
-    - Real results rendered immediately from `ToolResult.data`: compact table with `name`, `size_human`, `category`, `modified`, `folder`.
-    - For folders/categories: interactive bars with `HatchedProgressBar`.
-    - Gemma explanation streaming directly underneath with badge (`Gemma 4 (local)` or `Basic mode`).
-    - Audit log link in footer: `"Shared with the model: N bytes. View details"`.
-    - Result actions: right-click menu ("Open file", "Open containing folder", "Copy path").
-    - For duplicate / suggest_free_space results: `"Review in Cleanup"` button. When clicked, pushes items to `app_state.set_pending_cleanup(...)` and calls `app_state.navigate_to(3)`.
-    - Safety disclaimer: `"Nothing is changed until you confirm in Cleanup."`
-  - Empty state: when no scan is loaded, shows button linking to Analyzer.
-  - Offline banner: when Gemma is offline, shows `"Gemma is offline, using basic commands"`.
-- Wired into `ui/main_window.py` at nav index 4 (`Command Center`).
+PySide6 UI screen.
+
+```python
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QWidget
+from commands.flow import CommandContext
+
+class CommandCenterPage(QWidget):
+    reviewInCleanupRequested = Signal(list)
+
+    def set_context(self, ctx: CommandContext) -> None: ...
+    def set_gemma_available(self, available: bool) -> None: ...
+```
+
+Layout & Features:
+- Title + subtitle.
+- Conversation scroll area (empty state shows 5 suggestion chips):
+  1. "What is taking the most space?"
+  2. "Show my 10 largest files"
+  3. "Find duplicate files"
+  4. "Files older than 1 year"
+  5. "I need 5 GB free"
+- Input pill with Send and Stop buttons.
+- Small latency line under each answer (`"results in 2.1 s, explained in 9.8 s"`).
+- If no scan exists: chips are disabled and an inline `"Scan a folder first"` button navigates to Analyzer (`app_state.navigate_to(1)`).
+- `"Review in Cleanup"` emits `reviewInCleanupRequested(list)` which queues files to `app_state.set_pending_cleanup(items)` and navigates to Cleanup (`app_state.navigate_to(3)`). Never deletes files directly.

@@ -570,6 +570,29 @@ QDialog {{
 """
 
 
+def safe_font_size(size: Any, default: int = 10) -> int:
+    """Ensure font point size is an integer > 0, falling back to default (10) if <= 0 or invalid."""
+    try:
+        val = int(size)
+        return val if val > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def create_safe_font(family: str, size: int = 10, weight: Optional[QFont.Weight] = None) -> QFont:
+    """Safely construct a QFont with a guaranteed positive point size (> 0)."""
+    pt = safe_font_size(size, 10)
+    font = QFont(family, pt)
+    if weight is not None:
+        font.setWeight(weight)
+    return font
+
+
+def safe_set_point_size(font: QFont, size: int = 10) -> None:
+    """Safely set point size on a QFont ensuring the value is > 0."""
+    font.setPointSize(safe_font_size(size, 10))
+
+
 def apply_theme(app: QApplication) -> None:
     """
     Load fonts and apply the global stylesheet to *app*.
@@ -580,5 +603,5 @@ def apply_theme(app: QApplication) -> None:
 
     # Set a sensible default application font
     body = _resolve_body_font()
-    default_font = QFont(body, 14)
+    default_font = create_safe_font(body, 14)
     app.setFont(default_font)

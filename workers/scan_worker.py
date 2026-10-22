@@ -25,7 +25,7 @@ class ScanWorker(QThread):
 
     Signals
     -------
-    progress(int, int, str)
+    progress(object, object, str)
         Emitted during scan: (files_scanned, bytes_scanned, current_folder)
     scan_finished(object)
         Emitted when scan finishes (normally or cancelled) with ScanResult
@@ -33,7 +33,7 @@ class ScanWorker(QThread):
         Emitted if an unhandled exception occurs
     """
 
-    progress: Signal = Signal(int, int, str)
+    progress: Signal = Signal(object, object, str)
     scan_finished: Signal = Signal(object)
     failed: Signal = Signal(str)
 

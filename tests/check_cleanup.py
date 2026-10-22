@@ -53,7 +53,8 @@ def _make_temp_copy(demo_dir: Path) -> Path:
 
 def _cleanup_temp(tmp_root: Path) -> None:
     try:
-        shutil.rmtree(str(tmp_root), ignore_errors=True)
+        from send2trash import send2trash
+        send2trash(str(tmp_root))
     except Exception:
         pass
 

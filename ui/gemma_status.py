@@ -18,7 +18,7 @@ import json
 import logging
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtGui import QColor, QCursor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -63,6 +63,7 @@ class GemmaStatusBadge(QWidget):
     - Click pill: opens GemmaSettingsDialog
     - Click refresh button: triggers a background health check
     """
+    connectionChanged = Signal(bool)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -94,7 +95,7 @@ class GemmaStatusBadge(QWidget):
         # Status text
         self._label = QLabel("Checking Gemma…")
         self._label.setObjectName("statusText")
-        font = QFont(theme.FONT_BODY, 9, QFont.Weight.Medium)
+        font = theme.create_safe_font(theme.FONT_BODY, 9, QFont.Weight.Medium)
         self._label.setFont(font)
         pill_layout.addWidget(self._label)
 
@@ -173,6 +174,7 @@ class GemmaStatusBadge(QWidget):
                 "QFrame { background-color: #ECECED; border: 1px solid #D4D4D8; border-radius: 13px; } "
                 "QFrame:hover { background-color: #E2E2E4; border-color: #A1A1AA; }"
             )
+        self.connectionChanged.emit(connected)
 
     def _on_pill_clicked(self, event) -> None:
         dlg = GemmaSettingsDialog(self)
@@ -207,12 +209,12 @@ class GemmaSettingsDialog(QDialog):
 
         # Title / Header
         title = QLabel("Gemma 4 Local AI Settings")
-        title.setFont(QFont(theme.FONT_TITLE, 14, QFont.Weight.Bold))
+        title.setFont(theme.create_safe_font(theme.FONT_TITLE, 14, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {theme.INK};")
         layout.addWidget(title)
 
         subtitle = QLabel("Deterministic reasoning and natural language tool routing powered by local Ollama.")
-        subtitle.setFont(QFont(theme.FONT_BODY, 9))
+        subtitle.setFont(theme.create_safe_font(theme.FONT_BODY, 9))
         subtitle.setStyleSheet(f"color: {theme.MUTED};")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -239,7 +241,7 @@ class GemmaSettingsDialog(QDialog):
 
         # Host
         host_label = QLabel("Ollama Host (Localhost only):")
-        host_label.setFont(QFont(theme.FONT_BODY, 9, QFont.Weight.Medium))
+        host_label.setFont(theme.create_safe_font(theme.FONT_BODY, 9, QFont.Weight.Medium))
         form_layout.addWidget(host_label)
 
         self._host_edit = QLineEdit(self._settings.host)
@@ -251,7 +253,7 @@ class GemmaSettingsDialog(QDialog):
 
         # Model
         model_label = QLabel("Model:")
-        model_label.setFont(QFont(theme.FONT_BODY, 9, QFont.Weight.Medium))
+        model_label.setFont(theme.create_safe_font(theme.FONT_BODY, 9, QFont.Weight.Medium))
         form_layout.addWidget(model_label)
 
         self._model_combo = QComboBox()
@@ -277,7 +279,7 @@ class GemmaSettingsDialog(QDialog):
         test_row.addWidget(self._test_btn)
 
         self._test_status_lbl = QLabel("")
-        self._test_status_lbl.setFont(QFont(theme.FONT_BODY, 9))
+        self._test_status_lbl.setFont(theme.create_safe_font(theme.FONT_BODY, 9))
         test_row.addWidget(self._test_status_lbl)
         test_row.addStretch()
 
@@ -292,7 +294,7 @@ class GemmaSettingsDialog(QDialog):
         priv_layout.setSpacing(4)
 
         priv_heading = QLabel("🔒 Privacy Guarantee")
-        priv_heading.setFont(QFont(theme.FONT_BODY, 9, QFont.Weight.Bold))
+        priv_heading.setFont(theme.create_safe_font(theme.FONT_BODY, 9, QFont.Weight.Bold))
         priv_heading.setStyleSheet("color: #1E40AF; background: transparent;")
         priv_layout.addWidget(priv_heading)
 
@@ -300,7 +302,7 @@ class GemmaSettingsDialog(QDialog):
             "Gemma runs locally through Ollama. Your files are never uploaded. "
             "Only file names, sizes, dates and totals are shared with the local model."
         )
-        priv_text.setFont(QFont(theme.FONT_BODY, 9))
+        priv_text.setFont(theme.create_safe_font(theme.FONT_BODY, 9))
         priv_text.setStyleSheet("color: #1E3A8A; background: transparent;")
         priv_text.setWordWrap(True)
         priv_layout.addWidget(priv_text)
@@ -439,11 +441,11 @@ class AuditLogDialog(QDialog):
         layout.setSpacing(12)
 
         heading = QLabel("Local AI Audit Log")
-        heading.setFont(QFont(theme.FONT_TITLE, 13, QFont.Weight.Bold))
+        heading.setFont(theme.create_safe_font(theme.FONT_TITLE, 13, QFont.Weight.Bold))
         layout.addWidget(heading)
 
         sub = QLabel("Every request sent to Gemma 4 is logged locally. OmniStore only transmits sanitized file metadata.")
-        sub.setFont(QFont(theme.FONT_BODY, 9))
+        sub.setFont(theme.create_safe_font(theme.FONT_BODY, 9))
         sub.setStyleSheet(f"color: {theme.MUTED};")
         layout.addWidget(sub)
 
@@ -473,12 +475,12 @@ class AuditLogDialog(QDialog):
         preview_layout.setSpacing(4)
 
         detail_lbl = QLabel("Sanitized Payload Detail:")
-        detail_lbl.setFont(QFont(theme.FONT_BODY, 9, QFont.Weight.Bold))
+        detail_lbl.setFont(theme.create_safe_font(theme.FONT_BODY, 9, QFont.Weight.Bold))
         preview_layout.addWidget(detail_lbl)
 
         self._payload_view = QTextEdit()
         self._payload_view.setReadOnly(True)
-        self._payload_view.setFont(QFont("Consolas", 9))
+        self._payload_view.setFont(theme.create_safe_font("Consolas", 9))
         self._payload_view.setStyleSheet("QTextEdit { background: #FAFAFA; border: 1px solid #E4E4E7; border-radius: 6px; }")
         preview_layout.addWidget(self._payload_view)
 

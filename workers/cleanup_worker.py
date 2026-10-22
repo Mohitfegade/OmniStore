@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 class CleanupWorker(QThread):
-    progress: Signal = Signal(int, int, str)    # done, total, current_path
+    progress: Signal = Signal(object, object, str)    # done, total, current_path
     finished: Signal = Signal(object)           # CleanupOutcome
     failed:   Signal = Signal(str)
 

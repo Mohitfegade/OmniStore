@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -251,18 +252,31 @@ class OllamaProvider(GemmaProvider):
 
         return calls
 
-    def warm_up(self) -> bool:
-        """Lightweight warmup request to load model weights into VRAM with keep_alive='30m'."""
+    def warm_up(self, tools: Optional[List[Dict[str, Any]]] = None) -> bool:
+        """Lightweight warmup request to load model weights and tool engine into VRAM with keep_alive='30m'."""
         validate_local_host(self.settings.host)
         url = self.settings.host.rstrip("/") + "/api/chat"
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.settings.model,
             "messages": [{"role": "user", "content": "ping"}],
             "stream": False,
             "think": False,
             "keep_alive": "30m",
-            "options": {"num_predict": 1},
+            "options": {"num_predict": 1, "num_ctx": 1024},
         }
+        if tools:
+            payload["tools"] = tools
+        else:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_scan_overview",
+                        "description": "storage overview",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
         body_bytes = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -280,12 +294,15 @@ class OllamaProvider(GemmaProvider):
     def chat_stream(
         self,
         messages: List[Dict[str, Any]],
+        *,
+        max_tokens: int = 200,
+        cancel: Optional[threading.Event] = None,
         options: Optional[Dict[str, Any]] = None,
         cancel_token: Optional[Callable[[], bool]] = None,
     ) -> Iterator[str]:
         """
         Streaming chat yielding text chunks as they arrive from Ollama NDJSON stream.
-        Passes keep_alive="30m", think=False, num_predict=220 for explanation calls.
+        Passes keep_alive="30m", think=False, num_predict=max_tokens for explanation calls.
         Logs timing to AuditLog without file contents.
         """
         validate_local_host(self.settings.host)
@@ -294,7 +311,7 @@ class OllamaProvider(GemmaProvider):
         opts = {
             "num_ctx": self.settings.num_ctx,
             "temperature": self.settings.temperature,
-            "num_predict": 220,
+            "num_predict": max_tokens,
         }
         if options:
             opts.update(options)
@@ -327,7 +344,7 @@ class OllamaProvider(GemmaProvider):
         try:
             with urllib.request.urlopen(req, timeout=self.settings.timeout_s) as resp:
                 for raw_line in resp:
-                    if cancel_token and cancel_token():
+                    if (cancel and cancel.is_set()) or (cancel_token and cancel_token()):
                         log.info("chat_stream cancelled by caller")
                         break
 

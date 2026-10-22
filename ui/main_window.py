@@ -49,6 +49,8 @@ from ui.duplicates import build_duplicates_scroll
 from ui.cleanup import build_cleanup_scroll
 from ui.command_center import build_command_center_scroll
 from ui.gemma_status import GemmaStatusBadge
+from commands.flow import CommandContext
+from workers.gemma_worker import WarmupWorker
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +208,8 @@ class TopBar(QFrame):
 
         # ── Stretch right ───────────────────────────────────────────
         root.addStretch()
-        root.addWidget(GemmaStatusBadge(self))
+        self.status_badge = GemmaStatusBadge(self)
+        root.addWidget(self.status_badge)
 
     def set_active(self, index: int) -> None:
         """Update nav button styles to reflect the active page index."""
@@ -274,6 +277,37 @@ class MainWindow(QMainWindow):
         self._pages.append(command_center_page)
         self._stack.addWidget(command_center_page)
 
+        # ── Wire Command Center context and cleanup routing ─────────
+        self._command_center = getattr(command_center_page, "command_center_page", None)
+        if self._command_center:
+            self._command_center.reviewInCleanupRequested.connect(self._on_command_center_review_cleanup)
+
+        def _update_command_center_ctx(*_args) -> None:
+            if self._command_center:
+                self._command_center.set_context(CommandContext(
+                    scan=app_state.get_latest_scan(),
+                    duplicates=app_state.get_latest_duplicates(),
+                    drives=None,
+                ))
+
+        app_state.add_scan_listener(lambda s: _update_command_center_ctx())
+        app_state.add_duplicates_listener(lambda d: _update_command_center_ctx())
+        _update_command_center_ctx()
+
+        # ── Gemma status & WarmupWorker ─────────────────────────────
+        self._warmed_up = False
+        self._warmup_worker = None
+
+        def _on_gemma_status_changed(connected: bool) -> None:
+            if self._command_center:
+                self._command_center.set_gemma_available(connected)
+            if connected and not self._warmed_up:
+                self._warmed_up = True
+                self._warmup_worker = WarmupWorker()
+                self._warmup_worker.start()
+
+        self._top_bar.status_badge.connectionChanged.connect(_on_gemma_status_changed)
+
         # ── Wire nav buttons ────────────────────────────────────────
         for i, btn in enumerate(self._top_bar.nav_buttons):
             # Use default-argument capture to freeze `i` in the lambda
@@ -284,6 +318,11 @@ class MainWindow(QMainWindow):
 
         # Start on Dashboard
         self._switch_page(0)
+
+    def _on_command_center_review_cleanup(self, items: list) -> None:
+        """Handle reviewInCleanupRequested from Command Center."""
+        app_state.set_pending_cleanup(items)
+        self._switch_page(3)
 
     def _switch_page(self, index: int) -> None:
         self._stack.setCurrentIndex(index)

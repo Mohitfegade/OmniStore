@@ -141,6 +141,13 @@ def _build_deterministic_explanation(tools: List[ToolResult]) -> str:
     return " ".join(parts) if parts else "No matching results found."
 
 
+def _parse_basic_calls(text: str) -> List[ToolCall]:
+    parsed = parse_basic(text)
+    if parsed is not None:
+        return [ToolCall(name=parsed.tool, arguments=parsed.args)]
+    return []
+
+
 def handle_user_request_staged(
     text: str,
     scan_result: Optional[ScanResult],
@@ -199,7 +206,7 @@ def handle_user_request_staged(
 
     # Step A: Intent resolution
     if cfg.fast_mode:
-        basic_calls = parse_basic(text)
+        basic_calls = _parse_basic_calls(text)
         if basic_calls:
             tool_calls = basic_calls
             mode = "basic"
@@ -220,7 +227,7 @@ def handle_user_request_staged(
 
     if not tool_calls and (not status.ok or not cfg.enabled):
         # Gemma is offline/disabled; try basic parser
-        basic_calls = parse_basic(text)
+        basic_calls = _parse_basic_calls(text)
         if basic_calls:
             tool_calls = basic_calls
             mode = "basic"
@@ -251,7 +258,7 @@ def handle_user_request_staged(
         first_reply = llm.chat(prompt_messages, tools=TOOL_SCHEMAS)
         if first_reply.error or (not first_reply.tool_calls and not first_reply.text):
             # Gemma errored; fallback to basic parser
-            basic_calls = parse_basic(text)
+            basic_calls = _parse_basic_calls(text)
             if basic_calls:
                 tool_calls = basic_calls
                 mode = "basic"

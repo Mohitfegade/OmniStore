@@ -19,7 +19,7 @@ import io
 import os
 from pathlib import Path
 import random
-import shutil
+from send2trash import send2trash
 import sys
 import time
 
@@ -60,10 +60,7 @@ def create_demo_data(target_dir: Path, force: bool = False) -> None:
             else:
                 print(f"[FORCE] Removing existing contents of {target_dir}...")
                 for item in entries:
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
+                    send2trash(str(item))
 
     target_dir.mkdir(parents=True, exist_ok=True)
 

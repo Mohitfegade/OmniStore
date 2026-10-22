@@ -1,12 +1,25 @@
 """
 tests/check_command_flow.py
 ===========================
-End-to-end headless verification of the staged Command Center execution flow:
-1. Tests handle_user_request_staged on demo scan data (OmniStore_Demo).
-2. Verifies that tools_ready is emitted BEFORE explanation streaming begins.
-3. Asserts factual consistency of explanations with executed tool results.
-4. Verifies offline fallback behavior using the deterministic basic parser.
-5. Prints latency benchmarks and PASS/FAIL status.
+End-to-end verification test for OmniStore Command Center flow:
+1. Static code compliance checks:
+   - engine/, commands/, gemma/ contain NO PySide6 or Qt imports.
+   - Codebase (excluding .venv, .git) contains NO os.remove or shutil.rmtree calls.
+2. Scans C:\\Users\\Mohit\\OmniStore_Demo headless with scanner and duplicates engine.
+3. Builds CommandContext.
+4. Executes 6 test questions twice:
+   - Pass 1: Real Ollama provider (SKIPPED gracefully if Ollama is offline).
+   - Pass 2: Offline fallback mode (provider=None).
+5. Strict assertions:
+   - Event sequence: routed -> tool_result -> explain_chunk* -> explain_done.
+   - Every event carries elapsed_ms.
+   - tool_result arrives within 6000 ms with Gemma.
+   - No output contains "junk" or "safe to delete".
+   - suggest_free_space output contains "up to".
+   - Gemma explanation fact-checking: all filenames and numbers originate from tool results.
+6. Prints a latency benchmark table:
+   question | routed_by | route ms | tool ms | first token ms | total ms
+7. Ends with PASS/FAIL.
 """
 
 from __future__ import annotations
@@ -21,51 +34,65 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from commands.agent import AgentResponse, handle_user_request_staged
+from commands.events import FlowEvent
+from commands.flow import CommandContext, run_command
 from engine.duplicates import find_duplicates
 from engine.scanner import scan_folder
-from gemma.config import GemmaSettings, load_settings
+from gemma.config import load_settings
 from gemma.ollama_provider import OllamaProvider
-from gemma.provider import GemmaProvider, ProviderReply, ProviderStatus, ToolCall
 
 
-class OfflineMockProvider(GemmaProvider):
-    """Mock provider simulating an offline Ollama daemon."""
-    name: str = "offline_mock"
-    is_local: bool = True
+def check_static_rules() -> None:
+    """Verify architectural boundaries and absence of permanent deletion."""
+    print("\n[Static Check 1/2] Checking Qt/PySide6 import boundaries...")
+    import_qt_pat = re.compile(r"^\s*(?:import|from)\s+(?:PySide6|PyQt5|PyQt6)\b", re.MULTILINE)
+    for folder in ("engine", "commands", "gemma"):
+        folder_path = ROOT / folder
+        for py_file in folder_path.rglob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            m = import_qt_pat.search(text)
+            assert not m, f"Forbidden Qt import found in {py_file}: {m.group(0)}"
+    print("  [OK] engine/, commands/, gemma/ contain no PySide6 or Qt imports.")
 
-    def health(self) -> ProviderStatus:
-        return ProviderStatus(
-            ok=False,
-            message="Ollama is offline (simulated)",
-            model="gemma4:e2b",
-            models_available=[],
-            latency_ms=None,
-        )
+    print("\n[Static Check 2/2] Checking codebase for permanent deletion calls...")
+    deletion_patterns = [
+        re.compile(r"\bos\.remove\s*\("),
+        re.compile(r"\bshutil\.rmtree\s*\("),
+        re.compile(r"\bos\.unlink\s*\("),
+    ]
+    for py_file in ROOT.rglob("*.py"):
+        parts = py_file.parts
+        if any(p in parts for p in (".venv", ".git", "brain", "__pycache__")):
+            continue
+        if py_file.name in ("check_command_flow.py", "check_cleanup.py"):
+            continue
+        text = py_file.read_text(encoding="utf-8")
+        for pat in deletion_patterns:
+            m = pat.search(text)
+            assert not m, f"Permanent deletion call found in {py_file}: {m.group(0)}"
+    print("  [OK] No os.remove, os.unlink, or shutil.rmtree calls anywhere in codebase.")
 
-    def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        options: Optional[Dict[str, Any]] = None,
-    ) -> ProviderReply:
-        return ProviderReply(text="", tool_calls=[], error="Ollama offline")
 
-
-def extract_facts_from_tool_runs(tool_runs: List[Any]) -> Tuple[Set[str], Set[str]]:
-    """Extract known file names and numbers from tool data & summaries."""
+def extract_facts_from_tool_data(data: Dict[str, Any]) -> Tuple[Set[str], Set[str]]:
+    """Extract known filenames and numbers from tool result data."""
     known_filenames: Set[str] = set()
     known_numbers: Set[str] = set()
 
     def visit(val: Any) -> None:
         if isinstance(val, dict):
             for k, v in val.items():
-                if k in ("name", "filename") and isinstance(v, str):
+                if k in ("name", "parent_name", "path") and isinstance(v, str):
+                    clean_name = os.path.basename(v).lower().strip()
+                    if clean_name:
+                        known_filenames.add(clean_name)
                     known_filenames.add(v.lower().strip())
                 if isinstance(v, (int, float)):
                     known_numbers.add(str(v))
                     if isinstance(v, int):
                         known_numbers.add(f"{v:,}")
+                elif isinstance(v, str):
+                    for s_num in re.findall(r"\b\d+(?:[\.,]\d+)?\b", v):
+                        known_numbers.add(s_num)
                 visit(v)
         elif isinstance(val, list):
             for item in val:
@@ -74,205 +101,235 @@ def extract_facts_from_tool_runs(tool_runs: List[Any]) -> Tuple[Set[str], Set[st
             known_numbers.add(str(val))
             if isinstance(val, int):
                 known_numbers.add(f"{val:,}")
+        elif isinstance(val, str):
+            for s_num in re.findall(r"\b\d+(?:[\.,]\d+)?\b", val):
+                known_numbers.add(s_num)
 
-    for tr in tool_runs:
-        visit(tr.data)
-        visit(tr.summary)
-
+    visit(data)
     return known_filenames, known_numbers
 
 
-def verify_facts(query: str, explanation: str, tool_runs: List[Any]) -> bool:
-    """Verify that file names and numbers in the explanation are grounded in tool results."""
-    known_filenames, known_numbers = extract_facts_from_tool_runs(tool_runs)
+def verify_explanation_facts(query: str, explanation: str, tool_data: Dict[str, Any]) -> None:
+    """Assert that file names and numbers in the explanation are backed by tool results."""
+    known_filenames, known_numbers = extract_facts_from_tool_data(tool_data)
 
-    # Add numbers from query
-    known_numbers.update(re.findall(r"\b\d+(?:[\.,]\d+)?\b", query))
-    known_numbers.update({str(i) for i in range(1, 101)})
+    query_numbers = set(re.findall(r"\b\d+(?:[\.,]\d+)?\b", query))
+    known_numbers.update(query_numbers)
+    # Common linguistic constants
+    known_numbers.update({"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "15", "20", "2024", "2025", "2026"})
 
-    # Check file names with common extensions
+    cleaned_text = explanation.replace("`", " ").replace("*", " ").replace("\\_", "_")
+
+    # 1. Filenames with extensions
     file_pattern = re.compile(r"\b[a-zA-Z0-9_\-\.\(\)\s]+\.(?:mp4|mkv|pdf|txt|zip|tar|gz|docx|csv)\b", re.IGNORECASE)
-    cleaned = explanation.replace("`", " ").replace("*", " ")
-    for fname in file_pattern.findall(cleaned):
-        fname_clean = fname.strip().lower()
-        if fname_clean not in known_filenames:
-            print(f"      [WARN] File '{fname}' mentioned in explanation not explicitly in tool results.")
+    for fn in file_pattern.findall(cleaned_text):
+        fn_clean = fn.strip().lower()
+        matched = any(fn_clean in kf or kf in fn_clean for kf in known_filenames)
+        assert matched, f"Hallucinated file name detected in explanation: '{fn}' not in tool results."
 
-    return True
+    # 2. Numbers mentioned
+    for num_str in re.findall(r"\b\d+(?:,\d+)*(?:\.\d+)?\b", cleaned_text):
+        raw_num = num_str.replace(",", "")
+        if raw_num in known_numbers or num_str in known_numbers:
+            continue
+        try:
+            flt = float(raw_num)
+            matched = any(abs(float(kn.replace(",", "")) - flt) < 0.2 for kn in known_numbers if kn.replace(",", "").replace(".", "").isdigit())
+        except ValueError:
+            matched = False
+        assert matched, f"Unverified number detected in explanation: '{num_str}' not in tool results or query."
 
 
-def main() -> int:
-    print(f"\n{'='*78}")
-    print("OmniStore: Staged Command Flow & Latency Benchmark")
-    print(f"{'='*78}\n")
+def run_test_suite() -> bool:
+    print("=" * 75)
+    print("OMNISTORE — COMMAND CENTER FLOW & BENCHMARK VERIFICATION")
+    print("=" * 75)
+
+    check_static_rules()
 
     user_home = Path(os.environ.get("USERPROFILE", os.path.expanduser("~")))
     demo_dir = user_home / "OmniStore_Demo"
     if not demo_dir.is_dir():
-        print(f"[SETUP] Demo folder not found at {demo_dir}. Creating demo folder...")
-        import subprocess
-        subprocess.run([sys.executable, str(ROOT / "tests" / "make_demo_data.py")], check=True)
+        print(f"\n[ERROR] Demo directory not found at {demo_dir}.")
+        print("Please run `python tests/make_demo_data.py` first.")
+        return False
 
-    print(f"[SCAN] Scanning demo folder: {demo_dir}")
+    print(f"\nScanning demo directory: {demo_dir} ...")
     scan_res = scan_folder(str(demo_dir))
     dup_res = find_duplicates(scan_res)
-    print(f"[SCAN] Completed: {len(scan_res.files)} files, {len(dup_res.groups)} duplicate groups.\n")
+    print(f"Scan ready: {len(scan_res.files)} files, {len(dup_res.groups)} duplicate groups.")
 
-    settings = load_settings()
-    real_provider = OllamaProvider(settings)
-    status = real_provider.health()
+    ctx = CommandContext(scan=scan_res, duplicates=dup_res, drives=None)
 
-    test_queries = [
-        "What is taking up the most space?",
+    questions = [
+        "What is taking the most space?",
+        "Show my 10 largest files",
         "Find duplicate files",
-        "Videos larger than 10 MB",
-        "Show ways to free 5 GB",
+        "Files older than 1 year",
+        "I need 1 GB free",
+        "Storage breakdown by category",
     ]
 
-    all_passed = True
-    benchmark_rows = []
+    settings = load_settings()
+    provider = OllamaProvider(settings)
+    gemma_health = provider.health()
+    gemma_online = gemma_health.ok
 
-    # ── PART 1: Online Gemma Test (if available) ───────────────────────────
-    if not status.ok:
-        print(f"[INFO] Local Ollama/Gemma is OFFLINE ({status.message}). Skipping online LLM benchmark.")
+    if not gemma_online:
+        print(f"\n[NOTICE] Ollama/Gemma 4 is offline: {gemma_health.message}")
+        print("  Pass 1 (Gemma flow) will be marked SKIPPED.")
     else:
-        print(f"[TEST 1/2] Testing Online Staged Flow with Gemma ({settings.model})...")
-        print("  Warming up model...")
-        real_provider.warm_up()
+        print(f"\n[OK] Connected to Ollama ({settings.model}, latency: {gemma_health.latency_ms} ms)")
+        print("  Warming up Gemma...")
+        from commands.tools import TOOL_SCHEMAS
+        provider.warm_up(TOOL_SCHEMAS)
 
-        for q in test_queries:
-            t0 = time.perf_counter()
-            t_tools_ready: Optional[float] = None
-            t_first_chunk: Optional[float] = None
-            chunks: List[str] = []
+    # Latency tracking: list of tuples (pass_name, q, routed_by, route_ms, tool_ms, first_token_ms, total_ms)
+    benchmarks: List[Dict[str, Any]] = []
 
-            def on_stage(stage: str, payload: Dict[str, Any]) -> None:
-                nonlocal t_tools_ready, t_first_chunk
-                if stage == "tools_ready":
-                    t_tools_ready = time.perf_counter() - t0
-                elif stage == "explanation_chunk":
-                    if t_first_chunk is None:
-                        t_first_chunk = time.perf_counter() - t0
-                    chunks.append(payload.get("text", ""))
+    # ─────────────────────────────────────────────────────────────
+    # PASS 1: Real Provider (if online)
+    # ─────────────────────────────────────────────────────────────
+    print("\n" + "=" * 75)
+    print("PASS 1: RUN_COMMAND WITH REAL PROVIDER")
+    print("=" * 75)
 
-            resp = handle_user_request_staged(
-                text=q,
-                scan_result=scan_res,
-                duplicate_result=dup_res,
-                provider=real_provider,
-                settings=settings,
-                on_stage=on_stage,
-            )
+    if not gemma_online:
+        print("  [SKIP] Skipping Pass 1 because Ollama is offline.")
+    else:
+        for q in questions:
+            print(f"\nRunning query: \"{q}\"")
+            events: List[FlowEvent] = []
+            route_ms = 0
+            tool_ms = 0
+            first_token_ms = 0
+            total_ms = 0
+            routed_by = ""
 
-            t_total = time.perf_counter() - t0
-            tools_sec = t_tools_ready or 0.0
-            first_sec = t_first_chunk or tools_sec
+            for ev in run_command(q, ctx, provider):
+                events.append(ev)
+                if ev.kind == "routed":
+                    route_ms = ev.elapsed_ms
+                    routed_by = ev.data.get("routed_by", "") if ev.data else ""
+                elif ev.kind == "tool_result":
+                    tool_ms = ev.elapsed_ms
+                elif ev.kind == "explain_chunk" and first_token_ms == 0:
+                    first_token_ms = ev.elapsed_ms
+                elif ev.kind == "explain_done":
+                    total_ms = ev.elapsed_ms
 
-            # Assertion 1: tools_ready MUST arrive BEFORE or at the first explanation chunk
-            timing_ok = (t_tools_ready is not None) and (t_first_chunk is None or t_tools_ready <= t_first_chunk + 0.05)
-            if not timing_ok:
-                all_passed = False
+            # 1. Event sequence check
+            kinds = [e.kind for e in events]
+            assert kinds[0] == "routed", f"Expected first event 'routed', got {kinds[0]}"
+            assert kinds[1] == "tool_result", f"Expected second event 'tool_result', got {kinds[1]}"
+            assert "explain_done" in kinds, "Expected 'explain_done' in events"
 
-            # Assertion 2: Factual check
-            verify_facts(q, resp.explanation, resp.tool_runs)
+            # 2. Latency constraint: tool_result arrives within 6000 ms
+            assert tool_ms <= 6000, f"Tool result took {tool_ms} ms (> 6000 ms limit)"
 
-            benchmark_rows.append({
-                "query": q,
-                "mode": resp.mode,
-                "tools_s": round(tools_sec, 2),
-                "first_tok_s": round(first_sec, 2),
-                "total_s": round(t_total, 2),
-                "pass": timing_ok and resp.ok,
+            # 3. Content safety
+            full_explanation = "".join(e.text for e in events if e.kind == "explain_chunk")
+            lower_expl = full_explanation.lower()
+            assert "junk" not in lower_expl, f"'junk' found in explanation: {full_explanation}"
+            assert "safe to delete" not in lower_expl, f"'safe to delete' found in explanation: {full_explanation}"
+
+            tool_data = next((e.data for e in events if e.kind == "tool_result"), {})
+            if "target_human" in tool_data or "suggest" in q.lower() or "free" in q.lower():
+                note = tool_data.get("note", "").lower()
+                assert "up to" in note or "up to" in lower_expl, f"'up to' missing in suggest_free_space: {note}"
+
+            # 4. Fact check
+            verify_explanation_facts(q, full_explanation, tool_data)
+
+            benchmarks.append({
+                "mode": "gemma",
+                "question": q,
+                "routed_by": routed_by,
+                "route_ms": route_ms,
+                "tool_ms": tool_ms,
+                "first_token_ms": first_token_ms,
+                "total_ms": total_ms,
             })
+            print(f"  [OK] Pass 1 verified: tool={tool_ms} ms, first_token={first_token_ms} ms, total={total_ms} ms")
 
-    # ── PART 2: Forced Offline Fallback Test ───────────────────────────────
-    print(f"\n[TEST 2/2] Testing Offline Fallback Flow with Deterministic Parser...")
-    offline_provider = OfflineMockProvider()
+    # ─────────────────────────────────────────────────────────────
+    # PASS 2: Fallback Mode (provider=None)
+    # ─────────────────────────────────────────────────────────────
+    print("\n" + "=" * 75)
+    print("PASS 2: RUN_COMMAND WITH PROVIDER=NONE (FALLBACK / BASIC MODE)")
+    print("=" * 75)
 
-    for q in test_queries:
-        t0 = time.perf_counter()
-        t_tools_ready: Optional[float] = None
-        t_first_chunk: Optional[float] = None
+    for q in questions:
+        print(f"\nRunning fallback query: \"{q}\"")
+        events = []
+        route_ms = 0
+        tool_ms = 0
+        first_token_ms = 0
+        total_ms = 0
+        routed_by = ""
 
-        def on_stage_off(stage: str, payload: Dict[str, Any]) -> None:
-            nonlocal t_tools_ready, t_first_chunk
-            if stage == "tools_ready":
-                t_tools_ready = time.perf_counter() - t0
-            elif stage == "explanation_chunk":
-                if t_first_chunk is None:
-                    t_first_chunk = time.perf_counter() - t0
+        for ev in run_command(q, ctx, provider=None):
+            events.append(ev)
+            if ev.kind == "routed":
+                route_ms = ev.elapsed_ms
+                routed_by = ev.data.get("routed_by", "") if ev.data else ""
+            elif ev.kind == "tool_result":
+                tool_ms = ev.elapsed_ms
+            elif ev.kind == "explain_chunk" and first_token_ms == 0:
+                first_token_ms = ev.elapsed_ms
+            elif ev.kind == "explain_done":
+                total_ms = ev.elapsed_ms
 
-        resp = handle_user_request_staged(
-            text=q,
-            scan_result=scan_res,
-            duplicate_result=dup_res,
-            provider=offline_provider,
-            settings=settings,
-            on_stage=on_stage_off,
-        )
-        t_total = time.perf_counter() - t0
+        kinds = [e.kind for e in events]
+        assert kinds[0] == "routed", f"Expected first event 'routed', got {kinds[0]}"
+        assert kinds[1] == "tool_result", f"Expected second event 'tool_result', got {kinds[1]}"
+        assert "explain_done" in kinds, "Expected 'explain_done' in events"
+        assert routed_by == "basic", f"Expected routed_by 'basic', got '{routed_by}'"
 
-        pass_off = (resp.mode == "basic") and resp.ok and len(resp.tool_runs) > 0 and bool(resp.explanation)
-        if not pass_off:
-            all_passed = False
+        done_ev = next(e for e in events if e.kind == "explain_done")
+        assert done_ev.source == "basic", f"Expected explain_done source 'basic', got '{done_ev.source}'"
 
-        benchmark_rows.append({
-            "query": f"[Offline] {q}",
-            "mode": resp.mode,
-            "tools_s": round(t_tools_ready or 0.0, 3),
-            "first_tok_s": round(t_first_chunk or 0.0, 3),
-            "total_s": round(t_total, 3),
-            "pass": pass_off,
+        full_explanation = "".join(e.text for e in events if e.kind == "explain_chunk")
+        lower_expl = full_explanation.lower()
+        assert "junk" not in lower_expl
+        assert "safe to delete" not in lower_expl
+
+        tool_data = next((e.data for e in events if e.kind == "tool_result"), {})
+        if "target_human" in tool_data or "free" in q.lower():
+            note = tool_data.get("note", "").lower()
+            assert "up to" in note or "up to" in lower_expl
+
+        benchmarks.append({
+            "mode": "basic",
+            "question": q,
+            "routed_by": routed_by,
+            "route_ms": route_ms,
+            "tool_ms": tool_ms,
+            "first_token_ms": first_token_ms,
+            "total_ms": total_ms,
         })
+        print(f"  [OK] Pass 2 verified (Basic mode): tool={tool_ms} ms, total={total_ms} ms")
 
-    # Test an unsupported query in offline mode
-    unsupported = "How do I make chocolate chip cookies?"
-    resp_unsup = handle_user_request_staged(
-        text=unsupported,
-        scan_result=scan_res,
-        duplicate_result=dup_res,
-        provider=offline_provider,
-        settings=settings,
-    )
-    pass_unsup = (resp_unsup.mode == "unavailable") and ("Try one of these supported queries" in resp_unsup.explanation)
-    if not pass_unsup:
-        all_passed = False
-
-    benchmark_rows.append({
-        "query": f"[Offline] {unsupported}",
-        "mode": resp_unsup.mode,
-        "tools_s": 0.0,
-        "first_tok_s": 0.0,
-        "total_s": round(resp_unsup.duration_ms / 1000.0, 3),
-        "pass": pass_unsup,
-    })
-
-    # ── LATENCY TABLE ──────────────────────────────────────────────────────
-    print(f"\n{'='*78}")
-    print("LATENCY & STAGING BENCHMARK TABLE")
-    print(f"{'='*78}")
-    print(f"{'QUERY':<36} | {'MODE':<6} | {'TOOLS (s)':<9} | {'1st TOK (s)':<11} | {'TOTAL (s)':<9} | {'RESULT'}")
-    print(f"{'-'*36}-+-{'-'*6}-+-{'-'*9}-+-{'-'*11}-+-{'-'*9}-+-{'-'*6}")
-
-    for row in benchmark_rows:
-        status_str = "PASS" if row["pass"] else "FAIL"
+    # ─────────────────────────────────────────────────────────────
+    # Latency Benchmark Table
+    # ─────────────────────────────────────────────────────────────
+    print("\n" + "=" * 90)
+    print("LATENCY BENCHMARK TABLE")
+    print("=" * 90)
+    header = f"{'Question':<34} | {'Mode':<7} | {'Routed By':<9} | {'Route ms':>8} | {'Tool ms':>7} | {'First Tk ms':>11} | {'Total ms':>8}"
+    print(header)
+    print("-" * len(header))
+    for b in benchmarks:
         print(
-            f"{row['query'][:35]:<36} | "
-            f"{row['mode']:<6} | "
-            f"{row['tools_s']:<9.2f} | "
-            f"{row['first_tok_s']:<11.2f} | "
-            f"{row['total_s']:<9.2f} | "
-            f"{status_str}"
+            f"{b['question']:<34} | {b['mode']:<7} | {b['routed_by']:<9} | "
+            f"{b['route_ms']:>8} | {b['tool_ms']:>7} | {b['first_token_ms']:>11} | {b['total_ms']:>8}"
         )
+    print("=" * 90)
 
-    print(f"{'='*78}\n")
-    if all_passed:
-        print("[SUCCESS] All staged command flow tests and assertions passed successfully.")
-        return 0
-    else:
-        print("[FAILURE] Some assertions or timing checks failed.")
-        return 1
+    print("\nOVERALL: ALL COMMAND FLOW CHECKS PASSED (PASS)")
+    return True
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    success = run_test_suite()
+    sys.exit(0 if success else 1)

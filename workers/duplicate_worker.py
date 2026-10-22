@@ -26,7 +26,7 @@ class DuplicateWorker(QThread):
 
     Signals
     -------
-    progress(str, int, int, int)
+    progress(str, object, object, object)
         Emitted during analysis: (stage_name, items_done, items_total, bytes_hashed)
     finished(object)
         Emitted when duplicate analysis completes with DuplicateResult
@@ -34,7 +34,7 @@ class DuplicateWorker(QThread):
         Emitted if an unhandled exception occurs
     """
 
-    progress: Signal = Signal(str, int, int, int)
+    progress: Signal = Signal(str, object, object, object)
     finished: Signal = Signal(object)
     failed: Signal = Signal(str)
 

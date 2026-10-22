@@ -107,7 +107,7 @@ class DonutChart(QWidget):
 
             # Center text: 0 B
             painter.setPen(QColor(theme.MUTED))
-            font = QFont(theme._resolve_title_font(), 16)
+            font = theme.create_safe_font(theme._resolve_title_font(), 16)
             painter.setFont(font)
             painter.drawText(QRectF(cx - inner_r, cy - 14, inner_r * 2, 28), Qt.AlignmentFlag.AlignCenter, "0 B")
             painter.end()
@@ -159,7 +159,7 @@ class DonutChart(QWidget):
         total_str = format_bytes(total_val)
 
         painter.setPen(QColor(theme.INK))
-        font_total = QFont(title_font_name, 17, QFont.Weight.DemiBold)
+        font_total = theme.create_safe_font(title_font_name, 17, QFont.Weight.DemiBold)
         painter.setFont(font_total)
         painter.drawText(
             QRectF(cx - inner_r, cy - 16, inner_r * 2, 24),
@@ -168,7 +168,7 @@ class DonutChart(QWidget):
         )
 
         painter.setPen(QColor(theme.MUTED))
-        font_sub = QFont(theme._resolve_body_font(), 10, QFont.Weight.Medium)
+        font_sub = theme.create_safe_font(theme._resolve_body_font(), 10, QFont.Weight.Medium)
         painter.setFont(font_sub)
         painter.drawText(
             QRectF(cx - inner_r, cy + 8, inner_r * 2, 18),

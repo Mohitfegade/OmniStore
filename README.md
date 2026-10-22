@@ -67,10 +67,12 @@ omnistore/
 The **Command Center** allows users to explore their storage using conversational English.
 
 ### Key Features:
-- **Staged Speed Architecture**: Real results (compact tables, visual hatched progress bars) appear immediately from deterministic tools; the Gemma explanation streams underneath directly afterward.
-- **Strict Safety Isolation**: Gemma is strictly read-only and has NO tools that can delete, move, rename, copy, or open files. All cleanup actions must be confirmed by the user in the **Cleanup Center**.
-- **Offline Deterministic Fallback**: If Gemma/Ollama is offline or `fast_mode` is enabled, OmniStore uses a rule-based parser that maps queries directly to engine tools with zero downtime.
-- **Audit Transparency**: Every byte shared with Gemma is sanitized (names and numbers only, no file contents) and logged to the AI Audit Log viewer.
+- **Fast Staged Flow**: Real results (compact tables, visual bars) appear within 1–2 seconds from deterministic engine tools; the Gemma explanation streams underneath directly afterward.
+- **7 Deterministic Read-Only Tools**: Scan overview, largest files, flexible filtering, largest folders, category breakdown, duplicate summary, and the new `suggest_free_space` tool (which compiles review candidates from duplicates, old files, and empty files).
+- **Strict Safety Isolation**: Gemma is strictly read-only and has NO tools that can delete, move, rename, copy, or open files. It never sees file contents—only names, dates, sizes, and totals. Deletion is only possible via explicit user confirmation in the **Cleanup Center** using `send2trash`.
+- **Honest & Conservative Wording**: Uses "up to" for all reclaimable space estimates; strictly forbids words like "junk" or "safe to delete".
+- **Offline Deterministic Fallback**: If Gemma/Ollama is offline or disabled, OmniStore uses a rule-based parser that maps queries directly to engine tools with zero downtime and provides structured basic explanations.
+- **Audit Transparency**: Every byte shared with Gemma is sanitized (names and numbers only, no file contents) and logged to the local AI Audit Log viewer (`ai_audit_log.jsonl`).
 
 ### Quick Setup:
 1. Install [Ollama](https://ollama.com).
@@ -79,7 +81,7 @@ The **Command Center** allows users to explore their storage using conversationa
    ollama pull gemma4:e2b
    ```
 3. Start OmniStore (`python main.py`). The top-bar badge will show **`● Gemma 4 (local) connected`** in green.
-4. For presentation details and judge walkthroughs, see [docs/demo_script.md](docs/demo_script.md).
+4. For a 90-second judge walkthrough and presentation questions, see [docs/demo_script.md](docs/demo_script.md).
 
 ---
 

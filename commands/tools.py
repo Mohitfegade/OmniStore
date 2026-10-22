@@ -18,16 +18,17 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
+import os
 import re
 import time
-import os
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from engine.categories import CATEGORIES, category_for
-from engine.drives import format_bytes
 from engine.duplicates import DuplicateResult, build_duplicate_summary, find_duplicates
+from engine.formatting import display_name, format_size
 from engine.models import FileRecord, ScanResult
 from engine.query import (
     build_scan_summary,
@@ -36,6 +37,8 @@ from engine.query import (
     largest_folders,
     summarize_by_category,
 )
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tool Schemas for Gemma / Ollama Function Calling
@@ -211,15 +214,15 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "suggest_free_space",
-            "description": "Find potential candidates to free up a target amount of disk space (combining duplicate extra copies and old unaccessed files for user review).",
+            "description": "Find potential candidates to free up a target amount of disk space (combining duplicate extra copies and old files for user review).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "target_gb": {
                         "type": "number",
-                        "description": "Target amount of space to free up in gigabytes (GB, between 0.1 and 1000).",
+                        "description": "Target amount of space to free up in gigabytes (GB, between 0.1 and 5000).",
                         "minimum": 0.1,
-                        "maximum": 1000.0,
+                        "maximum": 5000.0,
                     },
                 },
                 "required": ["target_gb"],
@@ -434,11 +437,11 @@ def validate_tool_call(name: str, arguments: Dict[str, Any]) -> tuple[bool, Dict
 
         val = arguments["target_gb"]
         if isinstance(val, bool) or not isinstance(val, (int, float)):
-            return False, {}, f"'target_gb' must be a number between 0.1 and 1000, got {type(val).__name__}."
+            return False, {}, f"'target_gb' must be a number between 0.1 and 5000, got {type(val).__name__}."
 
         fval = float(val)
-        if not (0.1 <= fval <= 1000.0):
-            return False, {}, f"'target_gb' must be between 0.1 and 1000, got {fval}."
+        if not (0.1 <= fval <= 5000.0):
+            return False, {}, f"'target_gb' must be between 0.1 and 5000, got {fval}."
 
         cleaned["target_gb"] = fval
         return True, cleaned, None
@@ -447,31 +450,39 @@ def validate_tool_call(name: str, arguments: Dict[str, Any]) -> tuple[bool, Dict
 
 
 # ---------------------------------------------------------------------------
-# Tool Execution
+# Tool Execution Helpers
 # ---------------------------------------------------------------------------
 
 def _file_record_to_dict(f: FileRecord) -> Dict[str, Any]:
+    parent = f.parent_folder
     return {
-        "name": f.name if len(f.name) <= 60 else f.name[:57] + "...",
+        "name": display_name(f.name),
+        "parent_name": display_name(parent),
         "path": f.path,
         "size_bytes": f.size_bytes,
-        "size_human": format_bytes(f.size_bytes),
+        "size_human": format_size(f.size_bytes),
+        "size_bytes_human": format_size(f.size_bytes),
         "category": category_for(f.extension),
         "extension": f.extension,
         "modified_date": datetime.datetime.fromtimestamp(f.modified_ts).strftime("%Y-%m-%d"),
-        "folder": f.parent_folder[-40:] if len(f.parent_folder) > 40 else f.parent_folder,
+        "folder": parent[-40:] if len(parent) > 40 else parent,
     }
 
 
 def _compact_summary_item(r: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "name": r.get("name", "")[:50],
+        "parent_name": r.get("parent_name", "")[:50],
         "size_bytes": r.get("size_bytes", 0),
         "size_human": r.get("size_human", ""),
         "category": r.get("category", ""),
         "modified_date": r.get("modified_date", ""),
     }
 
+
+# ---------------------------------------------------------------------------
+# Tool Execution
+# ---------------------------------------------------------------------------
 
 def execute_tool(
     name: str,
@@ -501,29 +512,41 @@ def execute_tool(
 
         if name == "get_scan_overview":
             summary = build_scan_summary(scan_result)
-            summary["total_size_human"] = format_bytes(summary["total_bytes"])
+            total_bytes = summary["total_bytes"]
+            summary["total_bytes_human"] = format_size(total_bytes)
+            summary["total_size_human"] = format_size(total_bytes)
+
             for cat in summary.get("categories", []):
-                cat["size_human"] = format_bytes(cat.get("total_bytes", 0))
+                cb = cat.get("total_bytes", 0)
+                cat["size_human"] = format_size(cb)
+                cat["total_bytes_human"] = format_size(cb)
+
             for fld in summary.get("top_folders", []):
                 p = fld.get("path", "")
-                fld["name"] = Path(p).name or p
-                fld["size_human"] = format_bytes(fld.get("total_bytes", 0))
+                fld["name"] = display_name(p)
+                fld["parent_name"] = display_name(os.path.dirname(p))
+                fb = fld.get("total_bytes", 0)
+                fld["size_human"] = format_size(fb)
+                fld["total_bytes_human"] = format_size(fb)
 
             top_cats = [
                 {
                     "category": c["category"],
                     "total_bytes": c["total_bytes"],
-                    "size_human": format_bytes(c["total_bytes"]),
+                    "total_bytes_human": format_size(c["total_bytes"]),
+                    "size_human": format_size(c["total_bytes"]),
                     "percent": c["percent_of_total"],
                 }
                 for c in summary.get("categories", [])[:5]
             ]
             top_flds = [
                 {
-                    "name": Path(f.get("path", "")).name or f.get("path", ""),
+                    "name": display_name(f.get("path", "")),
+                    "parent_name": display_name(os.path.dirname(f.get("path", ""))),
                     "path": f.get("path", ""),
                     "total_bytes": f.get("total_bytes", 0),
-                    "size_human": format_bytes(f.get("total_bytes", 0)),
+                    "total_bytes_human": format_size(f.get("total_bytes", 0)),
+                    "size_human": format_size(f.get("total_bytes", 0)),
                     "percent_of_scan": f.get("percent_of_scan", 0.0),
                 }
                 for f in summary.get("top_folders", [])[:3]
@@ -537,7 +560,8 @@ def execute_tool(
                     "root_path": summary["root_path"],
                     "total_files": summary["total_files"],
                     "total_bytes": summary["total_bytes"],
-                    "total_size_human": format_bytes(summary["total_bytes"]),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                     "top_categories": top_cats,
                     "top_folders": top_flds,
                 },
@@ -564,15 +588,19 @@ def execute_tool(
                 ok=True,
                 data={
                     "files": records,
+                    "items": records,  # alias for backwards compatibility
                     "count": len(records),
                     "total_bytes": total_bytes,
-                    "total_size_human": format_bytes(total_bytes),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                 },
                 summary={
                     "count": len(records),
                     "total_bytes": total_bytes,
-                    "total_size_human": format_bytes(total_bytes),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                     "top_10": [_compact_summary_item(r) for r in records[:10]],
+                    "top_items": [_compact_summary_item(r) for r in records[:10]],
                 },
             )
 
@@ -613,15 +641,19 @@ def execute_tool(
                 ok=True,
                 data={
                     "files": records,
+                    "items": records,  # alias for backwards compatibility
                     "count": len(records),
                     "total_bytes": total_bytes,
-                    "total_size_human": format_bytes(total_bytes),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                 },
                 summary={
                     "count": len(records),
                     "total_bytes": total_bytes,
-                    "total_size_human": format_bytes(total_bytes),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                     "top_10": [_compact_summary_item(r) for r in records[:10]],
+                    "top_items": [_compact_summary_item(r) for r in records[:10]],
                 },
             )
 
@@ -631,11 +663,14 @@ def execute_tool(
             enriched_folders = []
             for f in folders:
                 p = f.get("path", "")
+                tb = f.get("total_bytes", 0)
                 enriched_folders.append({
-                    "name": Path(p).name or p,
+                    "name": display_name(p),
+                    "parent_name": display_name(os.path.dirname(p)),
                     "path": p,
-                    "total_bytes": f.get("total_bytes", 0),
-                    "size_human": format_bytes(f.get("total_bytes", 0)),
+                    "total_bytes": tb,
+                    "total_bytes_human": format_size(tb),
+                    "size_human": format_size(tb),
                     "percent_of_scan": f.get("percent_of_scan", 0.0),
                 })
             return ToolResult(
@@ -650,10 +685,12 @@ def execute_tool(
             total_bytes = sum(c["total_bytes"] for c in cats)
             enriched_cats = []
             for c in cats:
+                cb = c["total_bytes"]
                 enriched_cats.append({
                     "category": c["category"],
-                    "total_bytes": c["total_bytes"],
-                    "size_human": format_bytes(c["total_bytes"]),
+                    "total_bytes": cb,
+                    "total_bytes_human": format_size(cb),
+                    "size_human": format_size(cb),
                     "file_count": c.get("file_count", 0),
                     "percent_of_total": c.get("percent_of_total", 0.0),
                 })
@@ -663,12 +700,14 @@ def execute_tool(
                 data={
                     "categories": enriched_cats,
                     "total_bytes": total_bytes,
-                    "total_size_human": format_bytes(total_bytes),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                 },
                 summary={
                     "categories": enriched_cats[:8],
                     "total_bytes": total_bytes,
-                    "total_size_human": format_bytes(total_bytes),
+                    "total_bytes_human": format_size(total_bytes),
+                    "total_size_human": format_size(total_bytes),
                 },
             )
 
@@ -683,11 +722,25 @@ def execute_tool(
                 )
             max_groups = min(cleaned_args.get("max_groups", 5), 50)
             summary = build_duplicate_summary(duplicate_result, max_groups=max_groups)
-            summary["reclaimable_human"] = format_bytes(summary["total_reclaimable_bytes"])
+            rec_bytes = summary["total_reclaimable_bytes"]
+            summary["reclaimable_human"] = format_size(rec_bytes)
+            summary["total_reclaimable_bytes_human"] = format_size(rec_bytes)
 
             for g in summary.get("top_groups", []):
-                g["size_human"] = format_bytes(g.get("size_bytes", 0))
-                g["reclaimable_human"] = format_bytes(g.get("reclaimable_bytes", 0))
+                sb = g.get("size_bytes", 0)
+                rb = g.get("reclaimable_bytes", 0)
+                g["size_human"] = format_size(sb)
+                g["size_bytes_human"] = format_size(sb)
+                g["reclaimable_human"] = format_size(rb)
+                g["reclaimable_bytes_human"] = format_size(rb)
+                for f_item in g.get("files", []):
+                    if isinstance(f_item, dict):
+                        p = f_item.get("path", "")
+                        f_item["name"] = display_name(p)
+                        f_item["parent_name"] = display_name(os.path.dirname(p))
+                        if "size_bytes" in f_item:
+                            f_item["size_human"] = format_size(f_item["size_bytes"])
+                            f_item["size_bytes_human"] = format_size(f_item["size_bytes"])
 
             return ToolResult(
                 name=name,
@@ -696,8 +749,9 @@ def execute_tool(
                 summary={
                     "total_groups": summary["total_groups"],
                     "total_duplicate_files": summary["total_duplicate_files"],
-                    "total_reclaimable_bytes": summary["total_reclaimable_bytes"],
-                    "reclaimable_human": format_bytes(summary["total_reclaimable_bytes"]),
+                    "total_reclaimable_bytes": rec_bytes,
+                    "total_reclaimable_bytes_human": format_size(rec_bytes),
+                    "reclaimable_human": format_size(rec_bytes),
                     "top_groups": summary.get("top_groups", [])[:5],
                 },
             )
@@ -705,10 +759,13 @@ def execute_tool(
         elif name == "suggest_free_space":
             target_gb = cleaned_args.get("target_gb", 1.0)
             target_bytes = int(target_gb * 1024 * 1024 * 1024)
-            candidates: List[Dict[str, Any]] = []
-            seen_paths: set[str] = set()
 
-            # 1. Duplicates: extra copies, keep oldest copy
+            running_total = 0
+            seen_paths: set[str] = set()
+            suggestions: List[Dict[str, Any]] = []
+            candidates: List[Dict[str, Any]] = []
+
+            # 1. (a) Exact duplicate extra copies if duplicate results exist
             dup_res = duplicate_result
             if dup_res is None and scan_result:
                 try:
@@ -716,22 +773,32 @@ def execute_tool(
                 except Exception:
                     dup_res = None
 
+            dup_paths: List[str] = []
+            dup_bytes = 0
             if dup_res and dup_res.groups:
                 for g in dup_res.groups:
+                    if running_total >= target_bytes:
+                        break
                     sorted_files = sorted(g.files, key=lambda f: f.modified_ts)
                     oldest = sorted_files[0]
                     keep_path = oldest.path
                     seen_paths.add(os.path.normcase(os.path.abspath(keep_path)))
 
                     for dup_file in sorted_files[1:]:
+                        if running_total >= target_bytes:
+                            break
                         norm_p = os.path.normcase(os.path.abspath(dup_file.path))
                         if norm_p not in seen_paths:
                             seen_paths.add(norm_p)
+                            dup_paths.append(dup_file.path)
+                            dup_bytes += dup_file.size_bytes
+                            running_total += dup_file.size_bytes
                             candidates.append({
                                 "path": dup_file.path,
-                                "name": dup_file.name[:60],
+                                "name": display_name(dup_file.name),
+                                "parent_name": display_name(dup_file.parent_folder),
                                 "size_bytes": dup_file.size_bytes,
-                                "size_human": format_bytes(dup_file.size_bytes),
+                                "size_human": format_size(dup_file.size_bytes),
                                 "modified_date": datetime.datetime.fromtimestamp(dup_file.modified_ts).strftime("%Y-%m-%d"),
                                 "reason": "Exact duplicate",
                                 "keep_path": keep_path,
@@ -739,36 +806,103 @@ def execute_tool(
                                 "folder": dup_file.parent_folder[-40:] if len(dup_file.parent_folder) > 40 else dup_file.parent_folder,
                             })
 
-            # 2. Large unaccessed files: 180+ days old
-            cutoff_ts = now_ts - (180 * 86400)
-            for f in scan_result.files:
+            if dup_paths:
+                suggestions.append({
+                    "label": "Duplicate copies",
+                    "reason": "Exact duplicate extra copies (keeping original intact)",
+                    "count": len(dup_paths),
+                    "size_bytes": dup_bytes,
+                    "size_human": format_size(dup_bytes),
+                    "paths": dup_paths,
+                })
+
+            # 2. (b) Largest files older than 365 days
+            cutoff_365 = now_ts - (365 * 86400)
+            old_candidates = [
+                f for f in scan_result.files
+                if os.path.normcase(os.path.abspath(f.path)) not in seen_paths
+                and f.modified_ts < cutoff_365
+                and f.size_bytes > 0
+            ]
+            old_candidates.sort(key=lambda x: x.size_bytes, reverse=True)
+
+            old_paths: List[str] = []
+            old_bytes = 0
+            for f in old_candidates:
+                if running_total >= target_bytes:
+                    break
                 norm_p = os.path.normcase(os.path.abspath(f.path))
-                if norm_p in seen_paths:
-                    continue
-                acc_ts = f.accessed_ts or f.modified_ts
-                if acc_ts < cutoff_ts and f.size_bytes >= 5 * 1024 * 1024:
+                if norm_p not in seen_paths:
                     seen_paths.add(norm_p)
+                    old_paths.append(f.path)
+                    old_bytes += f.size_bytes
+                    running_total += f.size_bytes
                     candidates.append({
                         "path": f.path,
-                        "name": f.name[:60],
+                        "name": display_name(f.name),
+                        "parent_name": display_name(f.parent_folder),
                         "size_bytes": f.size_bytes,
-                        "size_human": format_bytes(f.size_bytes),
+                        "size_human": format_size(f.size_bytes),
                         "modified_date": datetime.datetime.fromtimestamp(f.modified_ts).strftime("%Y-%m-%d"),
-                        "reason": "Large file not opened recently",
+                        "reason": "Old file (>365 days)",
                         "keep_path": None,
                         "potential": "review only",
                         "folder": f.parent_folder[-40:] if len(f.parent_folder) > 40 else f.parent_folder,
                     })
 
-            # Sort descending by size
-            candidates.sort(key=lambda x: x["size_bytes"], reverse=True)
+            if old_paths:
+                suggestions.append({
+                    "label": "Files older than 1 year",
+                    "reason": "Large files not modified in the last 365 days",
+                    "count": len(old_paths),
+                    "size_bytes": old_bytes,
+                    "size_human": format_size(old_bytes),
+                    "paths": old_paths,
+                })
 
-            # Cap rows at 200
-            selected = candidates[:200]
-            cumulative_bytes = sum(c["size_bytes"] for c in selected)
-            target_reached = cumulative_bytes >= target_bytes
-            target_human = format_bytes(target_bytes)
-            cumulative_human = format_bytes(cumulative_bytes)
+            # 3. (c) Empty files (0 bytes)
+            empty_files = [
+                f for f in scan_result.files
+                if os.path.normcase(os.path.abspath(f.path)) not in seen_paths
+                and f.size_bytes == 0
+            ]
+            empty_paths: List[str] = []
+            for f in empty_files:
+                norm_p = os.path.normcase(os.path.abspath(f.path))
+                if norm_p not in seen_paths:
+                    seen_paths.add(norm_p)
+                    empty_paths.append(f.path)
+                    candidates.append({
+                        "path": f.path,
+                        "name": display_name(f.name),
+                        "parent_name": display_name(f.parent_folder),
+                        "size_bytes": 0,
+                        "size_human": "0 B",
+                        "modified_date": datetime.datetime.fromtimestamp(f.modified_ts).strftime("%Y-%m-%d"),
+                        "reason": "Empty file (0 bytes)",
+                        "keep_path": None,
+                        "potential": "review only",
+                        "folder": f.parent_folder[-40:] if len(f.parent_folder) > 40 else f.parent_folder,
+                    })
+
+            if empty_paths:
+                suggestions.append({
+                    "label": "Empty files",
+                    "reason": "Zero-byte files taking no storage",
+                    "count": len(empty_paths),
+                    "size_bytes": 0,
+                    "size_human": "0 B",
+                    "paths": empty_paths,
+                })
+
+            target_human = format_size(target_bytes)
+            total_up_to_bytes = running_total
+            total_up_to_human = format_size(total_up_to_bytes)
+            reachable = total_up_to_bytes >= target_bytes
+            note = (
+                f"Suggestions can free up to {total_up_to_human} towards your target of {target_human}. "
+                f"OmniStore never deletes files automatically; you must review everything before confirming in Cleanup."
+            )
 
             return ToolResult(
                 name=name,
@@ -777,31 +911,40 @@ def execute_tool(
                     "target_gb": target_gb,
                     "target_bytes": target_bytes,
                     "target_human": target_human,
-                    "cumulative_bytes": cumulative_bytes,
-                    "cumulative_human": cumulative_human,
-                    "target_reached": target_reached,
-                    "count": len(selected),
-                    "candidates": selected,
+                    "reachable": reachable,
+                    "total_up_to_bytes": total_up_to_bytes,
+                    "total_up_to_human": total_up_to_human,
+                    "suggestions": suggestions,
+                    "note": note,
+                    # Backward-compatibility fields
+                    "cumulative_bytes": total_up_to_bytes,
+                    "cumulative_human": total_up_to_human,
+                    "target_reached": reachable,
+                    "count": len(candidates),
+                    "candidates": candidates[:200],
                 },
                 summary={
                     "target_gb": target_gb,
                     "target_human": target_human,
-                    "cumulative_human": cumulative_human,
-                    "target_reached": target_reached,
-                    "count": len(selected),
-                    "top_candidates": [
+                    "reachable": reachable,
+                    "total_up_to_bytes": total_up_to_bytes,
+                    "total_up_to_human": total_up_to_human,
+                    "suggestions_count": len(suggestions),
+                    "suggestions": [
                         {
-                            "name": c.get("name", "")[:50],
-                            "size_human": c.get("size_human", ""),
-                            "reason": c.get("reason", ""),
-                            "potential": c.get("potential", ""),
+                            "label": s["label"],
+                            "reason": s["reason"],
+                            "count": s["count"],
+                            "size_human": s["size_human"],
                         }
-                        for c in selected[:10]
+                        for s in suggestions
                     ],
+                    "note": note,
                 },
             )
 
         return ToolResult(name=name, ok=False, data={}, summary={}, error=f"Unknown tool '{name}'.")
 
     except Exception as exc:
+        log.exception("Tool execution error for '%s'", name)
         return ToolResult(name=name, ok=False, data={}, summary={}, error=f"Tool execution error: {exc}")
