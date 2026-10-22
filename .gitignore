@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.key
+secrets.*
+ai_audit_log.jsonl
+cleanup_log*.jsonl
+dist/
+build/
+*.spec
+OmniStore_Demo/
+.idea/
+.vscode/
+graphify-out/cache/
