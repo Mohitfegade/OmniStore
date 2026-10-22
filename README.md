@@ -1,113 +1,118 @@
 # OmniStore
 
-> **One place to understand, find, and manage all your storage.**
+> **One place to understand, find, and manage all your storage.**  
+> A high-performance Windows desktop storage intelligence application built with Python 3.11+ and PySide6.  
+> **Author:** Mohit Fegade  
+> **Full Documentation:** [docs/submission.md](docs/submission.md)
 
-A Windows desktop storage management app built with Python + PySide6.
+---
+
+## Highlights & Safety Guarantees
+
+- **Zero Permanent Deletion**: Files are never permanently deleted using `os.remove` or `shutil.rmtree`. All deletions route safely to the Windows Recycle Bin via `send2trash` with explicit confirmation dialogs.
+- **Pure-Python Architecture Isolation**: `engine/`, `commands/`, and `gemma/` contain zero PySide6 / Qt dependencies. The business logic is 100% testable headless.
+- **Local & Private AI**: Powered by local Google Gemma 4 models running via Ollama (`127.0.0.1:11434`). Zero cloud transmissions; file contents are never read; all metadata exchanges are logged to `ai_audit_log.jsonl`.
+- **Fast Staged Flow**: Command Center renders visual results from deterministic engine tools in 1–2 seconds, followed by streaming natural-language explanations from Gemma.
+- **Deterministic Offline Fallback**: If Ollama or Gemma is offline, OmniStore automatically runs in fast Basic mode with a rule-based parser and zero downtime.
+- **64-bit Integer Safety**: Employs `Signal(object)` for byte counts, fully eliminating 32-bit integer overflow issues on multi-terabyte scans.
+
+---
+
+## Core Modules
+
+1. **Dashboard (`ui/dashboard.py`)**: Real-time disk capacity meters, health indicators, and quick action launchers.
+2. **Storage Analyzer (`ui/analyzer.py`)**: Deep directory scanner with category distribution breakdown and interactive folder treemap.
+3. **Duplicates Manager (`ui/duplicates.py`)**: Fast 3-tier duplicate detection (size -> 4 KB header/footer sample -> SHA256) with auto-selection rules.
+4. **Safe Cleanup Center (`ui/cleanup.py`)**: Categorized queues for temporary files, caches, old downloads, empty files, and duplicate copies, moving them to the Recycle Bin.
+5. **Command Center (`ui/command_center.py`)**: Conversational English search with 6 suggestion chips, progressive rendering, and local Gemma intelligence.
+
+---
+
+## Screenshots
+
+| Dashboard | Storage Analyzer |
+|---|---|
+| ![Dashboard](docs/screenshots/screenshot_dashboard.png) | ![Analyzer](docs/screenshots/screenshot_demo_scan.png) |
+
+| Duplicates & Cleanup | Command Center (Gemma 4) |
+|---|---|
+| ![Cleanup Center](docs/screenshots/screenshot_cleanup.png) | ![Command Center](docs/screenshots/screenshot_command_center_gemma.png) |
 
 ---
 
 ## Requirements
 
-- Windows 11 (tested) / Windows 10
-- Python 3.11 or newer
+- **OS**: Windows 10 / Windows 11 (64-bit)
+- **Python**: 3.11 or newer
+- **Local AI (Optional)**: [Ollama](https://ollama.com) with `gemma4:e2b` or any Gemma model
 
 ---
 
 ## Setup & Run
 
 ```powershell
-# 1. Clone / navigate to the project folder
-cd d:\OmniStore
+# 1. Clone repository
+git clone https://github.com/Mohitfegade/OmniStore.git
+cd OmniStore
 
-# 2. Create a virtual environment
+# 2. Create and activate virtual environment
 python -m venv .venv
+.venv\Scripts\activate
 
-# 3. Activate it
-.venv\Scripts\Activate.ps1
-
-# 4. Install dependencies
+# 3. Install pinned dependencies
 pip install -r requirements.txt
 
-# 5. Run the app
+# 4. Generate demo dataset (optional sandbox)
+python tests/make_demo_data.py
+
+# 5. Launch OmniStore
 python main.py
 ```
 
-> **Tip:** If `Activate.ps1` is blocked by execution policy, run:
-> ```powershell
-> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-> ```
-
----
-
-## Project Structure
-
+### Local Gemma AI Setup:
+```powershell
+# In a separate terminal:
+ollama pull gemma4:e2b
+ollama serve
 ```
-omnistore/
-├── main.py              # Entry point
-├── requirements.txt
-├── README.md
-├── docs/                # Architecture & contracts (contract_gemma.md, gemma_architecture.md)
-├── assets/
-│   └── fonts/           # Inter & Inter Tight .ttf files
-├── engine/              # Pure-Python storage logic (no UI imports)
-├── commands/            # Read-only tool schemas & agent loop (no UI imports)
-├── gemma/               # Local Ollama provider, config, & privacy guards (no UI imports)
-├── workers/             # QThread workers for background tasks
-└── ui/
-    ├── theme.py         # Design tokens + global QSS stylesheet
-    ├── components.py    # Reusable widgets (Card, StatCard, PillButton …)
-    ├── gemma_status.py  # Gemma status pill badge & settings dialog
-    └── main_window.py   # Shell with top-bar nav + QStackedWidget pages
-```
+When running, the top-bar badge automatically turns green: **`● Gemma 4 (local) connected`**.
 
 ---
 
-## Command Center & Local Gemma 4 AI
+## Verification & Test Suite
 
-The **Command Center** allows users to explore their storage using conversational English.
-
-### Key Features:
-- **Fast Staged Flow**: Real results (compact tables, visual bars) appear within 1–2 seconds from deterministic engine tools; the Gemma explanation streams underneath directly afterward.
-- **7 Deterministic Read-Only Tools**: Scan overview, largest files, flexible filtering, largest folders, category breakdown, duplicate summary, and the new `suggest_free_space` tool (which compiles review candidates from duplicates, old files, and empty files).
-- **Strict Safety Isolation**: Gemma is strictly read-only and has NO tools that can delete, move, rename, copy, or open files. It never sees file contents—only names, dates, sizes, and totals. Deletion is only possible via explicit user confirmation in the **Cleanup Center** using `send2trash`.
-- **Honest & Conservative Wording**: Uses "up to" for all reclaimable space estimates; strictly forbids words like "junk" or "safe to delete".
-- **Offline Deterministic Fallback**: If Gemma/Ollama is offline or disabled, OmniStore uses a rule-based parser that maps queries directly to engine tools with zero downtime and provides structured basic explanations.
-- **Audit Transparency**: Every byte shared with Gemma is sanitized (names and numbers only, no file contents) and logged to the local AI Audit Log viewer (`ai_audit_log.jsonl`).
-
-### Quick Setup:
-1. Install [Ollama](https://ollama.com).
-2. Pull the model:
-   ```powershell
-   ollama pull gemma4:e2b
-   ```
-3. Start OmniStore (`python main.py`). The top-bar badge will show **`● Gemma 4 (local) connected`** in green.
-4. For a 90-second judge walkthrough and presentation questions, see [docs/demo_script.md](docs/demo_script.md).
-
----
-
-## Verification & Testing
-
-OmniStore includes automated test suites to verify tools, parser rules, and command flows:
+OmniStore includes 15 automated test suites:
 
 ```powershell
-# 1. Verify pure-Python deterministic basic parser
-python tests/check_basic_parser.py
-
-# 2. Verify read-only tool suite & schemas
-python tests/check_tools.py
-
-# 3. Verify local Gemma model integration & privacy
-python tests/check_gemma.py
-
-# 4. End-to-end staged command flow & latency benchmark
-python tests/check_command_flow.py
+# Run the complete test suite:
+& "d:\OmniStore\.venv\Scripts\python.exe" -c "
+import os, subprocess, sys
+for f in sorted([f for f in os.listdir('tests') if f.endswith('.py') and f.startswith(('check_', 'test_'))]):
+    res = subprocess.run([sys.executable, os.path.join('tests', f)], capture_output=True, text=True)
+    status = 'PASS' if res.returncode == 0 else f'FAIL ({res.returncode})'
+    print(f'{f:30} {status}')
+"
 ```
+
+Individual test checks:
+- `python tests/check_basic_parser.py`: Validates 18 NLP query patterns with the offline rule-based parser.
+- `python tests/check_tools.py`: Validates all 7 read-only tool contracts and argument schemas.
+- `python tests/check_signals.py`: Validates AST signal safety and 64-bit integer emissions.
+- `python tests/check_gemma.py`: Validates local Gemma connection, fact-checking assertions, and audit log.
+- `python tests/check_command_flow.py`: Validates end-to-end staged flow and latency benchmarks.
+- `python tests/check_ui_chips.py`: Validates live UI execution of all 6 Command Center suggestion chips.
+- `python tests/test_cleanup_ui.py`: Validates Cleanup UI widgets and confirmation modals.
+- `python tests/test_duplicates_ui.py`: Validates duplicate grouping and selection filters.
+- `python tests/test_e2e_cleanup_flow.py`: Validates end-to-end scan-to-recycle-bin safety flow.
+- `python tests/test_large_scan_ui.py`: Validates UI stability under large-scale file scans.
 
 ---
 
-## Font Notes
+## Documentation
 
-Place the **Inter** and **Inter Tight** static `.ttf` files inside `assets/fonts/`.
-The app loads every `.ttf` it finds there at startup and falls back to *Segoe UI*
-gracefully if the folder is empty.
-
+- [docs/submission.md](docs/submission.md) — Comprehensive submission report & architecture overview
+- [docs/demo_script.md](docs/demo_script.md) — 90-second judge walkthrough & presentation script
+- [docs/status.md](docs/status.md) — Pre-submission readiness audit and checklist
+- [docs/contract_command_center.md](docs/contract_command_center.md) — Command Center staged flow specification
+- [docs/contract_gemma.md](docs/contract_gemma.md) — Gemma provider interface & privacy constraints
+- [docs/signal_fix.md](docs/signal_fix.md) — 64-bit signal overflow architectural analysis

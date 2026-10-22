@@ -32,6 +32,8 @@ from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
 import app_state
+from commands.events import FlowEvent
+from commands.flow import CommandContext
 from engine.duplicates import find_duplicates
 from engine.scanner import scan_folder
 from gemma.config import load_settings
@@ -83,12 +85,13 @@ def run_chips_benchmark() -> int:
     app.processEvents()
 
     # Locate CommandCenterPage
-    command_page = None
-    for p in win._pages:
-        widget = p.widget()
-        if widget and widget.__class__.__name__ == "CommandCenterPage":
-            command_page = widget
-            break
+    command_page = getattr(win, "_command_center", None)
+    if not command_page:
+        for p in win._pages:
+            widget = p.widget()
+            if widget and widget.__class__.__name__ == "CommandCenterPage":
+                command_page = widget
+                break
 
     assert command_page is not None, "Could not find CommandCenterPage in MainWindow stack."
 
@@ -104,33 +107,39 @@ def run_chips_benchmark() -> int:
         t_tools_ready = None
         t_finished = None
         final_resp = None
+        explanation_chunks = []
+        is_error = False
 
         loop = QEventLoop()
 
         # Trigger chip
         command_page._on_chip_clicked(chip)
-        worker = command_page._current_worker
+        worker = getattr(command_page, "_active_worker", None)
         assert worker is not None, f"Worker failed to start for chip '{chip}'"
 
-        def on_tools(payload):
-            nonlocal t_tools_ready
-            t_tools_ready = time.perf_counter() - t_start
+        def on_event(event: FlowEvent):
+            nonlocal t_tools_ready, t_finished, final_resp, is_error
+            if event.kind == "tool_result":
+                if t_tools_ready is None:
+                    t_tools_ready = time.perf_counter() - t_start
+            elif event.kind == "explain_chunk":
+                explanation_chunks.append(event.text)
+            elif event.kind == "explain_done":
+                t_finished = time.perf_counter() - t_start
+                final_resp = event
+                loop.quit()
+            elif event.kind == "notice":
+                t_finished = time.perf_counter() - t_start
+                final_resp = event
+                loop.quit()
+            elif event.kind == "error":
+                t_finished = time.perf_counter() - t_start
+                is_error = True
+                final_resp = event
+                print(f"      [ERROR] Chip failed: {event.text}")
+                loop.quit()
 
-        def on_finish(resp):
-            nonlocal t_finished, final_resp
-            t_finished = time.perf_counter() - t_start
-            final_resp = resp
-            loop.quit()
-
-        def on_fail(err):
-            nonlocal t_finished
-            t_finished = time.perf_counter() - t_start
-            print(f"      [ERROR] Chip failed: {err}")
-            loop.quit()
-
-        worker.tools_ready.connect(on_tools)
-        worker.finished.connect(on_finish)
-        worker.failed.connect(on_fail)
+        worker.eventReady.connect(on_event)
 
         # Timeout after 45 seconds to avoid infinite hangs
         timer = QTimer()
@@ -144,19 +153,19 @@ def run_chips_benchmark() -> int:
         total_sec = t_finished or 0.0
 
         # Check performance criteria
-        # Target: results on screen within ~6 seconds, explanation finished within ~15 seconds
         target_met = (tools_sec <= 7.0) and (total_sec <= 18.0)
-        status_str = "PASS" if (final_resp and final_resp.ok) else "FAIL"
-        if not (final_resp and final_resp.ok):
+        status_str = "PASS" if (final_resp is not None and not is_error) else "FAIL"
+        if is_error or final_resp is None:
             all_ok = False
 
+        full_exp = "".join(explanation_chunks) or (final_resp.text if final_resp else "")
         results_table.append({
             "chip": chip,
             "tools_s": round(tools_sec, 2),
             "total_s": round(total_sec, 2),
             "status": status_str,
             "target_met": target_met,
-            "explanation": final_resp.explanation if final_resp else "",
+            "explanation": full_exp,
         })
 
         print(
